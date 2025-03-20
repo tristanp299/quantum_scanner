@@ -1,14 +1,16 @@
 # quantum_scanner
 
+## Author Comments
+
 quantum_scanner.py was originally made to circumvent firewalls and pesky IDS and EDRs that would stop my enumeration mid scan. BOOO! 
 
 So instead of switching my exit node like a normal person I decided to create a port scanner that would utilize quantum computing ciphers and techniques to evade any stoppage.
 
 Well believe it or not that stuff is hard, so for now I made a port scanner that has some special scanning methods that helped me around those walls of fire. 
 
-Quantum Scanner
+## What is this thing?
 
-Quantum Scanner is a Python-based multi-mode port scanner that offers both conventional TCP/UDP scans (SYN, ACK, FIN, etc.) and additional specialized scans like a fragmented SYN scan and a mimic-based probe. It uses Scapy under the hood for packet crafting and sniffing, plus asyncio to manage concurrent scanning.
+Quantum Scanner is a Python-based multi-mode port scanner that offers both TCP/UDP scans (SYN, ACK, FIN, etc.) and additional specialized scans like a fragmented SYN scan and a mimic-based probe. It uses Scapy under the hood for packet crafting and sniffing, plus asyncio to manage concurrent scanning.
 Features
 
     Multiple Scan Types
