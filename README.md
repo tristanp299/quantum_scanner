@@ -90,7 +90,7 @@ Mimic Scan
 
 The mimic scan type sends a partial protocol banner in the TCP SYN packet.
 
-    --mimic-protocol: Choose from "HTTP", "SSH", "FTP", etc. (default=HTTP)
+    --mimic-protocol: Choose from "HTTP", "SSH", "FTP", "SMTP", "IMAP", "POP3" (default=HTTP)
 ```
 sudo python3 quantum_scanner.py 10.0.0.5 -p 22 -s mimic --mimic-protocol SSH
 ```
