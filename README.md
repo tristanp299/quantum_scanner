@@ -45,9 +45,9 @@ Make sure you have appropriate permissions for raw socket operations:
     Mac/Windows: Administrator privileges.
 
 ## Usage
-
+```
 python3 quantum_scanner.py [OPTIONS] target
-
+```
 Required Arguments
 
     target: A hostname or IP address (IPv4 or IPv6).
