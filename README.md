@@ -59,15 +59,16 @@ Required Arguments
 Common Scan Types
 
 Use the -s or --scan-types option to select one or more scan types. For example:
-
+```
 -s syn ssl udp ack fin xmas null window tls_echo mimic frag
-
+```
 Defaults to ["syn"] if none are specified.
-Example Command
 
+Example:
+```
 sudo python3 quantum_scanner.py -p 80,443 -s syn ssl udp ack fin \
     --verbose 10.0.0.5
-
+```
 Additional Options
 
     -v, --verbose: Prints debug information.
@@ -110,11 +111,11 @@ Additional Fragment Options
     If used, the script sends exactly two fragments total for each SYN – the first includes the entire TCP header plus some data, the second includes any remaining data. Some firewalls block many-fragment scenarios but allow minimal fragmentation.
 
 Example: Using frag with bigger first fragment and exactly two fragments:
-
+```
 sudo python3 quantum_scanner.py 10.0.0.5 -p 80 -s frag \
     --frag-first-min-size 128 \
     --frag-two-frags
-
+```
 Note: Modern firewalls often drop or ignore fragmented SYN packets, so you may see “filtered” even for an open port.
 Output
 
@@ -130,15 +131,8 @@ After each scan completes, results are printed in a Rich table with columns:
     OS Guess (basic TTL-based heuristic)
 
 If --json-output is set, scan_results.json will be generated with the same data in JSON form.
-Development and Contributing
 
-Pull requests and forks are welcome! For suggestions, please open an issue.
-Because the script depends on raw packets, some features require root/administrator access.
-Testing on a local lab or Docker environment without strict firewalls is recommended if you want to see the full effect of advanced fragmentation/evasions.
-
-Disclaimer: This tool is provided for legitimate testing and research only. Be sure to have proper authorization for scanning remote systems.
-
-## Special Port Scans
+## Special Port Scans Explained
 
 ### TLS Echo Mask Scan
 
