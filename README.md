@@ -11,7 +11,8 @@ Well believe it or not that stuff is hard, so for now I made a port scanner that
 ## What is this thing?
 
 Quantum Scanner is a Python-based multi-mode port scanner that offers both TCP/UDP scans (SYN, ACK, FIN, etc.) and additional specialized scans like a fragmented SYN scan and a mimic-based probe. It uses Scapy under the hood for packet crafting and sniffing, plus asyncio to manage concurrent scanning.
-Features
+
+Features:
 
     Multiple Scan Types
         TCP: SYN, ACK, FIN, XMAS, NULL, WINDOW
