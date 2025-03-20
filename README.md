@@ -23,7 +23,6 @@ Features
     Additional Tools
         Banner Grabbing: Automatically attempts to read a banner from open TCP ports.
         Service Fingerprinting: Guesses service based on banner or known ports.
-        Vulnerability Checks: Minimal pattern-based checks (e.g., older Apache or OpenSSH).
 
     Evasion Options
         TTL/Hop Limit: Randomize the IPv4 TTL or IPv6 hlim.
