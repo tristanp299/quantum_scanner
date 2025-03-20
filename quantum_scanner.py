@@ -29,7 +29,7 @@ from rich.console import Console  # Makes our output look pretty
 from rich.progress import Progress
 from rich.table import Table
 
-# Keep Scapy quiet - it can be a bit chatty otherwise
+# Keep Scapy quiet 
 scapy.conf.verb = 0
 console = Console()
 
@@ -1190,7 +1190,7 @@ if __name__ == "__main__":
 
     # Fragment scan settings
     parser.add_argument("--mimic-protocol", default="HTTP",
-                        help="Protocol to mimic (HTTP, SSH, FTP, etc.) when using 'mimic' scan type.")
+                        help="Protocol to mimic (HTTP, SSH, FTP, SMTP, IMAP, POP3) when using 'mimic' scan type.")
     parser.add_argument("--frag-min-size", type=int, default=16,
                         help="Minimum fragment size in bytes (multiple of 8) for 'frag' scan.")
     parser.add_argument("--frag-max-size", type=int, default=64,
