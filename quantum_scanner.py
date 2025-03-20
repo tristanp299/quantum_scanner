@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+# Yo! This is a pretty cool port scanner that can do all sorts of neat tricks
+# It's got your basic SYN scans, SSL checks, UDP probes, and some fancy stuff
+# like protocol mimicry and packet fragmentation. Basically, it's like a Swiss
+# Army knife for network scanning. Oh, and it's got some stealth features too
+# so you don't get caught by those pesky firewalls 😉
+
 import asyncio
 import logging
 import random
@@ -14,24 +21,41 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
-import scapy.all as scapy
-from cryptography import x509
+# Import the good stuff we need
+import scapy.all as scapy  # This is our packet manipulation buddy
+from cryptography import x509  # For handling those SSL certs
 from cryptography.hazmat.backends import default_backend
-from rich.console import Console
+from rich.console import Console  # Makes our output look pretty
 from rich.progress import Progress
 from rich.table import Table
 
-scapy.conf.verb = 0  # Make Scapy quiet
+# Keep Scapy quiet - it can be a bit chatty otherwise
+scapy.conf.verb = 0
 console = Console()
 
+# Set up our logging - we want to see what's happening both in the file and console
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[logging.FileHandler("scanner.log"), logging.StreamHandler()],
 )
 
-# ---------------------- ENUMS & DATA ------------------------
+# ################ ENUMS & DATA ################
 class ScanType(Enum):
+    """
+    Here's all the cool scanning techniques we can use:
+    - SYN: The classic, fast and reliable
+    - SSL: For checking those secure connections
+    - UDP: When you need to check those UDP ports
+    - ACK: Helps figure out if there's a firewall
+    - FIN: Stealth mode activated
+    - XMAS: Like FIN but with all the flags set
+    - NULL: The minimalist approach
+    - WINDOW: Checks those TCP window sizes
+    - TLSECHO: Sneaky TLS detection
+    - MIMIC: Makes our scan look like legit traffic
+    - FRAG: Splits packets to sneak past firewalls
+    """
     SYN = "syn"
     SSL = "ssl"
     UDP = "udp"
@@ -41,12 +65,24 @@ class ScanType(Enum):
     NULL = "null"
     WINDOW = "window"
     TLSECHO = "tls_echo"
-    # -- New ScanTypes --
     MIMIC = "mimic"  # Protocol Mimic Scan
     FRAG = "frag"    # Advanced Fragmented SYN Scan
 
 @dataclass
 class PortResult:
+    """
+    This is where we store all the juicy info we find about each port.
+    We keep track of:
+    - What TCP states we found
+    - UDP status
+    - If there's a firewall in the way
+    - What service is running
+    - Version numbers
+    - Any vulnerabilities we spot
+    - SSL certificate details
+    - Service banners
+    - What OS we think it's running
+    """
     tcp_states: Dict[ScanType, str] = field(default_factory=dict)
     udp_state: str = ""
     filtering: str = ""
@@ -57,7 +93,8 @@ class PortResult:
     banner: str = ""
     os_guess: str = ""
 
-# A dictionary of protocol "mimic" payloads
+# These are our protocol mimic payloads - they make our scans look legit
+# Basically, we're pretending to be normal traffic to avoid detection
 MIMIC_PAYLOADS = {
     "HTTP": b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
     "SSH": b"SSH-2.0-OpenSSH_8.2\r\n",
@@ -65,11 +102,19 @@ MIMIC_PAYLOADS = {
     "SMTP": b"220 mail.example.com ESMTP\r\n",
     "IMAP": b"* OK IMAP4rev1 Service Ready\r\n",
     "POP3": b"+OK POP3 server ready\r\n",
-    # Add more if needed
 }
 
-# ---------------------- MAIN SCANNER ------------------------
+# ################ MAIN SCANNER ################
 class QuantumScanner:
+    """
+    This is our main scanner class - it's pretty awesome!
+    Here's what it can do:
+    1. Run all kinds of port scans
+    2. Handle both IPv4 and IPv6 (future-proof!)
+    3. Sneak past firewalls with evasion tricks
+    4. Figure out what services are running
+    5. Spot potential security issues
+    """
     def __init__(
         self,
         target: str,
@@ -85,17 +130,34 @@ class QuantumScanner:
         timeout_scan: float = 3.0,
         timeout_connect: float = 3.0,
         timeout_banner: float = 3.0,
-        # --- Additional arguments for mimic & fragment scans ---
+        # Fragment scan specific parameters
         mimic_protocol: str = "HTTP",
         frag_min_size: int = 16,
         frag_max_size: int = 64,
         frag_min_delay: float = 0.01,
         frag_max_delay: float = 0.1,
         frag_timeout: int = 10,
-        # New user-configurable fragment options
         frag_first_min_size: int = 64,
         frag_two_frags: bool = False
     ):
+        """
+        Let's set up our scanner with all the good stuff!
+        Here's what we need:
+        - target: The machine we're gonna scan
+        - ports: Which ports to check
+        - scan_types: What kind of scans to run
+        - concurrency: How many scans at once
+        - max_rate: Don't overwhelm the target
+        - evasions: Sneaky mode activated?
+        - verbose: Want all the details?
+        - use_ipv6: Future-proof scanning
+        - json_output: Save results in JSON
+        - shuffle_ports: Mix up the order
+        - timeout_*: How long to wait
+        - mimic_protocol: What to pretend to be
+        - frag_*: Settings for packet splitting
+        """
+        # Store our basic settings
         self.use_ipv6 = use_ipv6
         self.json_output = json_output
         self.shuffle_ports = shuffle_ports
@@ -104,8 +166,8 @@ class QuantumScanner:
         self.timeout_banner = timeout_banner
         self.mimic_protocol = mimic_protocol
 
-        # Enforce minimum size to hold entire TCP header in the first fragment
-        self.frag_min_size = max(frag_min_size, 24)  # keep old logic
+        # Set up our fragmentation settings
+        self.frag_min_size = max(frag_min_size, 24)  # Need enough space for TCP header
         self.frag_max_size = max(frag_max_size, self.frag_min_size)
         self.frag_min_delay = frag_min_delay
         self.frag_max_delay = frag_max_delay
@@ -113,18 +175,19 @@ class QuantumScanner:
         self.frag_first_min_size = frag_first_min_size
         self.frag_two_frags = frag_two_frags
 
-        # Resolve target IP
+        # Figure out the target's IP address
         if not self.use_ipv6:
             self.target_ip = socket.gethostbyname(target)
             try:
                 self.local_ip = scapy.conf.route.route(self.target_ip)[1]
             except Exception:
-                self.local_ip = None  # or "0.0.0.0"
+                self.local_ip = None
         else:
             info = socket.getaddrinfo(target, None, socket.AF_INET6)
             self.target_ip = info[0][4][0]
             self.local_ip = "::"
 
+        # Get our ports ready
         if self.shuffle_ports:
             random.shuffle(ports)
         self.ports = ports
@@ -134,24 +197,35 @@ class QuantumScanner:
         self.evasions = evasions
         self.verbose = verbose
 
+        # Set up our results storage and rate limiting
         self.results: Dict[int, PortResult] = {}
         self.adaptation_factor = 1.0
         self.history = deque(maxlen=100)
         self.lock = asyncio.Lock()
 
-        # SSL context
+        # Get SSL ready for secure connections
         self.ctx = ssl.create_default_context()
         self.ctx.check_hostname = False
         self.ctx.verify_mode = ssl.CERT_NONE
 
+        # Check if we're root (needed for some cool tricks)
         if self.evasions and os.geteuid() != 0:
-            logging.error("Evasions require root privileges! Exiting.")
+            logging.error("Hey! We need root privileges for the sneaky stuff! Exiting.")
             sys.exit(1)
 
         if self.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
 
     async def run_scan(self):
+        """
+        This is where the magic happens! Here's what we do:
+        1. Set up our results storage
+        2. Show a cool progress bar
+        3. Run all our scans at once
+        4. Figure out what services we found
+        5. Look for security issues
+        6. Show off our results
+        """
         logging.info(f"Starting scan of {self.target_ip}")
         for port in self.ports:
             self.results[port] = PortResult()
@@ -171,8 +245,17 @@ class QuantumScanner:
         self.generate_report()
 
     async def scan_port(self, port: int, progress, task, sem: asyncio.Semaphore):
+        """
+        Let's scan a single port with all our cool techniques!
+        We:
+        1. Use a semaphore to not overwhelm things
+        2. Run each type of scan we want
+        3. Try to grab banners if we find something
+        4. Keep the progress bar updated
+        """
         async with sem:
             for st in self.scan_types:
+                # Run the right kind of scan
                 if st == ScanType.SYN:
                     await self.syn_scan(port)
                 elif st == ScanType.SSL:
@@ -203,7 +286,7 @@ class QuantumScanner:
                         self.frag_timeout
                     )
 
-                # If an open TCP port is detected, attempt banner grabbing immediately
+                # If we found something open, let's grab its banner
                 if any(state == "open" for state in self.results[port].tcp_states.values()):
                     await self.banner_grabbing(port)
 
@@ -213,10 +296,10 @@ class QuantumScanner:
 
     # -------------------- COMMON BUILDERS --------------------
     def build_ip_layer(self):
-        '''
-        Builds an IPv4 or IPv6 layer with the appropriate source and
-        destination addresses. If self.local_ip is None, we let Scapy pick.
-        '''
+        """
+        Builds our IP packet layer - IPv4 or IPv6, whatever floats your boat!
+        This is a helper that all our scan types use to make their packets.
+        """
         if not self.use_ipv6:
             ip_layer = scapy.IP(dst=self.target_ip)
             if self.local_ip:
@@ -229,7 +312,10 @@ class QuantumScanner:
             return ip_layer
 
     def set_ip_ttl_or_hlim(self, ip_layer) -> None:
-        '''Sets TTL (IPv4) or hlim (IPv6) to a default or random value if evasions are enabled.'''
+        """
+        Sets up the TTL (IPv4) or hop limit (IPv6) field.
+        If we're in evasion mode, we randomize it to look less suspicious.
+        """
         if self.use_ipv6:
             ip_layer.hlim = random.choice([64, 128, 255]) if self.evasions else 64
         else:
@@ -237,7 +323,16 @@ class QuantumScanner:
 
     # -------------------- SCAN METHODS --------------------
     async def syn_scan(self, port: int, max_tries=3):
-        '''Performs a SYN scan.'''
+        """
+        The classic SYN scan - fast and reliable!
+        Here's how it works:
+        1. Send a SYN packet
+        2. Wait for the response
+        3. Figure out what it means:
+           - Got SYN/ACK? Port is open!
+           - Got RST? Port is closed
+           - Nothing? Might be filtered
+        """
         def do_syn_probe():
             for _ in range(max_tries):
                 ip_layer = self.build_ip_layer()
@@ -269,7 +364,13 @@ class QuantumScanner:
                 self.os_fingerprint(port, resp)
 
     async def ack_scan(self, port: int):
-        '''Performs an ACK scan (checks filtering).'''
+        """
+        Let's check if there's a firewall in the way!
+        This scan:
+        1. Sends an ACK packet
+        2. If we get RST back = no firewall
+        3. If nothing = probably filtered
+        """
         def do_ack_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -294,7 +395,13 @@ class QuantumScanner:
             self.results[port].filtering = filtering
 
     async def fin_scan(self, port: int):
-        '''Performs a FIN scan.'''
+        """
+        Time for some stealth scanning!
+        This one:
+        1. Sends a FIN packet
+        2. If nothing back = might be open
+        3. If RST = definitely closed
+        """
         def do_fin_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -318,7 +425,13 @@ class QuantumScanner:
             self.results[port].tcp_states[ScanType.FIN] = state
 
     async def xmas_scan(self, port: int):
-        '''Performs an XMAS scan (FIN+PSH+URG flags).'''
+        """
+        The Christmas tree scan - we set all the flags!
+        Similar to FIN scan but more festive:
+        1. Send packet with FIN+PSH+URG flags
+        2. If nothing back = might be open
+        3. If RST = definitely closed
+        """
         def do_xmas_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -342,7 +455,13 @@ class QuantumScanner:
             self.results[port].tcp_states[ScanType.XMAS] = state
 
     async def null_scan(self, port: int):
-        '''Performs a NULL scan (no flags).'''
+        """
+        The minimalist approach - no flags at all!
+        Another stealth technique:
+        1. Send packet with no flags
+        2. If nothing back = might be open
+        3. If RST = definitely closed
+        """
         def do_null_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -366,7 +485,13 @@ class QuantumScanner:
             self.results[port].tcp_states[ScanType.NULL] = state
 
     async def window_scan(self, port: int):
-        '''Performs a Window scan.'''
+        """
+        Let's check those TCP window sizes!
+        This scan:
+        1. Sends an ACK packet
+        2. Looks at the window size in response
+        3. Sometimes spots open ports
+        """
         def do_window_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -394,7 +519,13 @@ class QuantumScanner:
             self.results[port].tcp_states[ScanType.WINDOW] = state
 
     async def udp_scan(self, port: int):
-        '''Performs a basic UDP scan (tries not to rely on ICMP).'''
+        """
+        Time to check those UDP ports!
+        This scan:
+        1. Sends a UDP packet
+        2. Waits for response
+        3. Checks for ICMP errors
+        """
         def do_udp_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -418,7 +549,14 @@ class QuantumScanner:
             self.results[port].udp_state = state
 
     async def ssl_probe(self, port: int):
-        '''Attempts an SSL/TLS connection, capturing the certificate info if successful.'''
+        """
+        Let's check for SSL/TLS services!
+        This probe:
+        1. Tries to make an SSL connection
+        2. Gets certificate info
+        3. Checks SSL version
+        4. Looks for security issues
+        """
         def do_ssl_connect():
             try:
                 with socket.create_connection((self.target_ip, port), timeout=self.timeout_connect) as sock:
@@ -445,7 +583,13 @@ class QuantumScanner:
                 self.results[port].vulns.extend(vulns)
 
     async def tls_echo_mask_scan(self, port: int):
-        '''TLS Echo Mask Scan: minimal TLS payload in a SYN packet.'''
+        """
+        Sneaky TLS detection time!
+        This technique:
+        1. Sends SYN with minimal TLS data
+        2. Can sneak past firewalls
+        3. Spots TLS services
+        """
         def do_tls_echo_mask_probe():
             ip_layer = self.build_ip_layer()
             self.set_ip_ttl_or_hlim(ip_layer)
@@ -484,9 +628,13 @@ class QuantumScanner:
 
     # -------------------- MIMIC SCAN --------------------
     async def mimic_scan(self, port: int, protocol: str, max_tries=3):
-        '''
-        Sends a SYN packet with partial protocol-mimicking data and checks for open/closed/filtered.
-        '''
+        """
+        Let's pretend to be legit traffic!
+        This technique:
+        1. Sends SYN with protocol-specific data
+        2. Looks like normal traffic
+        3. Can sneak past IDS/IPS
+        """
         def do_mimic_probe():
             if protocol not in MIMIC_PAYLOADS:
                 # Fall back to basic "HTTP" if unknown
@@ -521,7 +669,7 @@ class QuantumScanner:
         async with self.lock:
             self.results[port].tcp_states[ScanType.MIMIC] = state
 
-    # -------------------- FRAGMENTED SYN SCAN (Updated) --------------------
+    # -------------------- FRAGMENTED SYN SCAN --------------------
     async def fragmented_syn_scan(
         self,
         port: int,
@@ -532,12 +680,15 @@ class QuantumScanner:
         timeout: int,
         max_tries: int = 3
     ):
-        '''
-        Perform a Fragmented SYN Scan.
-        - If self.frag_two_frags is set, we use exactly two fragments.
-        - Otherwise we do multiple fragments, but ensure the first is at least self.frag_first_min_size bytes.
-        '''
-
+        """
+        Time for some packet splitting action!
+        This advanced technique:
+        1. Splits SYN packet into pieces
+        2. Sneaks past firewalls
+        3. Can do two modes:
+           - Two fragments (header + data)
+           - Multiple random-sized fragments
+        """
         def do_frag_scan():
             ip_id = random.randint(1, 65535)
             ip_layer = self.build_ip_layer()
@@ -583,7 +734,7 @@ class QuantumScanner:
             def send_fragments():
                 # If user wants exactly two fragments:
                 if self.frag_two_frags:
-                    # 1) First fragment: at least frag_first_min_size in size (or remainder if smaller).
+                    # 1) First fragment: at least frag_first_min_size in size
                     first_size = min(total_size, max(self.frag_first_min_size, min_frag_size))
                     remain = total_size - first_size
 
@@ -683,7 +834,7 @@ class QuantumScanner:
                         remain -= frag_size
                         time.sleep(random.uniform(min_delay, max_delay))
 
-            # Attempt multiple tries
+            # Try a few times to get a response
             for _ in range(max_tries):
                 final_state[0] = "filtered"
                 sniff_thread = threading.Thread(
@@ -697,7 +848,7 @@ class QuantumScanner:
                 )
                 sniff_thread.start()
 
-                # Send fragments
+                # Send our fragments
                 send_fragments()
 
                 sniff_thread.join()
@@ -713,6 +864,13 @@ class QuantumScanner:
 
     # -------------------- OS FINGERPRINTING --------------------
     def os_fingerprint(self, port: int, resp):
+        """
+        Let's figure out what OS they're running!
+        We check:
+        1. TTL/hop limit values
+        2. TCP options
+        3. Window sizes
+        """
         if not resp.haslayer(scapy.TCP):
             return
         ip4 = resp.getlayer(scapy.IP)
@@ -738,7 +896,13 @@ class QuantumScanner:
         self.results[port].os_guess = os_guess
 
     async def banner_grabbing(self, port: int):
-        '''Attempt banner grabbing on an open TCP port.'''
+        """
+        Let's grab those service banners!
+        This helps us know:
+        1. What service is running
+        2. What version it is
+        3. Any extra details we can find
+        """
         def do_banner():
             try:
                 with socket.create_connection((self.target_ip, port), timeout=self.timeout_connect) as sock:
@@ -768,7 +932,13 @@ class QuantumScanner:
                     self.results[port].service = "FTP"
 
     async def adaptive_delay(self):
-        '''Rate-limits or paces out scanning based on historical timings.'''
+        """
+        Smart rate limiting based on what we've seen before.
+        This helps us:
+        1. Not overwhelm the target
+        2. Get better results
+        3. Be more reliable
+        """
         if len(self.history) > 10:
             avg_delay = sum(self.history) / len(self.history)
             self.adaptation_factor = max(0.5, min(2.0, avg_delay * 1.2))
@@ -779,7 +949,13 @@ class QuantumScanner:
 
     # -------------------- SERVICE FINGERPRINTING, VULNS --------------------
     def service_fingerprinting(self):
-        '''Heuristic or known-port mapping to fill in 'service' if none.'''
+        """
+        Let's figure out what services are running!
+        We check:
+        1. Common ports
+        2. Service banners
+        3. Protocol details
+        """
         service_map = {
             80: "HTTP",
             443: "HTTPS",
@@ -787,6 +963,21 @@ class QuantumScanner:
             22: "SSH",
             25: "SMTP",
             3389: "RDP",
+            21: "FTP",
+            23: "Telnet",
+            110: "POP3",
+            995: "POP3S",
+            143: "IMAP",
+            993: "IMAPS",
+            135: "MSRPC",
+            139: "NetBIOS",
+            445: "SMB",
+            3306: "MySQL",
+            1433: "MSSQL",
+            1521: "Oracle",
+            5432: "PostgreSQL",
+            5900: "VNC",
+            5060: "SIP",
         }
         for port, result in self.results.items():
             if not result.service:
@@ -799,7 +990,13 @@ class QuantumScanner:
                     result.service = "HTTP"
 
     def analyze_vulnerabilities(self):
-        '''Basic pattern-based vulnerability matching.'''
+        """
+        Let's look for security issues!
+        We check:
+        1. Service versions
+        2. Known bugs
+        3. Weak settings
+        """
         vuln_db = {
             "apache/2.4.49": ["CVE-2021-41773 (Path Traversal)"],
             "openssh_8.0": ["CVE-2021-41617 (SSH Agent Vulnerability)"],
@@ -816,7 +1013,14 @@ class QuantumScanner:
                 result.vulns.append("Weak TLS version (TLSv1.0)")
 
     def parse_certificate(self, cert_bin: bytes) -> Dict:
-        '''Parse DER or PEM certificate into a dictionary.'''
+        """
+        Let's look at those SSL certificates!
+        We get:
+        1. Who owns it
+        2. Who issued it
+        3. When it's valid
+        4. Other cool details
+        """
         try:
             cert_obj = x509.load_der_x509_certificate(cert_bin, default_backend())
             return {
@@ -833,7 +1037,13 @@ class QuantumScanner:
             return {}
 
     def check_ssl_vulnerabilities(self, cert_info: Dict) -> List[str]:
-        '''Example checks for SSL vulnerabilities.'''
+        """
+        Let's check those SSL certs for issues!
+        We look for:
+        1. Weak algorithms
+        2. Expired certs
+        3. Other problems
+        """
         vulns = []
         if cert_info.get("signature_algorithm") == "sha1WithRSAEncryption":
             vulns.append("Weak signature (SHA1)")
@@ -841,7 +1051,14 @@ class QuantumScanner:
 
     # -------------------- REPORTING --------------------
     def generate_report(self):
-        '''Display results in a Rich table, then possibly write JSON.'''
+        """
+        Time to show off what we found!
+        We display:
+        1. Port scan results
+        2. Services we found
+        3. Security issues
+        4. OS info
+        """
         table = Table(title="Quantum Scan Results", show_lines=True)
         table.add_column("Port", style="cyan")
         table.add_column("TCP States", style="magenta")
@@ -870,6 +1087,13 @@ class QuantumScanner:
             self.dump_results_json()
 
     def print_statistics(self):
+        """
+        Let's show some cool stats!
+        We display:
+        1. Open ports we found
+        2. Services we spotted
+        3. Security issues
+        """
         open_tcp_ports = [p for p, r in self.results.items()
                           if any(st == "open" for st in r.tcp_states.values())]
         open_udp_ports = [p for p, r in self.results.items() if r.udp_state == "open"]
@@ -880,6 +1104,13 @@ class QuantumScanner:
         console.print(f"Vulnerabilities found: {total_vulns}")
 
     def dump_results_json(self):
+        """
+        Let's save our results to JSON!
+        This helps with:
+        1. Further analysis
+        2. Using with other tools
+        3. Making reports
+        """
         import json
         out_data = {}
         for port, result in self.results.items():
@@ -898,8 +1129,16 @@ class QuantumScanner:
             json.dump(out_data, fh, indent=4)
         console.print("[green]Results written to scan_results.json[/green]")
 
-# ---------------------- UTILITIES ------------------------
+################# UTILITIES ################
 def parse_ports(port_input: str) -> List[int]:
+    """
+    Let's parse those port numbers!
+    We handle:
+    - Single port: "80"
+    - Port range: "1-100"
+    - Multiple ports: "80,443,8080"
+    - Mixed: "80,1-100,443"
+    """
     ports = []
     if port_input.isdigit():
         p = int(port_input)
@@ -923,8 +1162,9 @@ def parse_ports(port_input: str) -> List[int]:
             raise ValueError(f"Invalid port spec: {part}")
     return sorted(set(ports))
 
-# ---------------------- MAIN ------------------------
+################# MAIN ################
 if __name__ == "__main__":
+    # Set up our command line arguments
     parser = ArgumentParser(description="Quantum Port Scanner with Additional Scan Methods")
     parser.add_argument("target", help="Target hostname or IP")
     parser.add_argument("-p", "--ports", required=True, help="e.g. 80, 1-100, 22,80")
@@ -940,7 +1180,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-rate", type=int, default=500, help="Max pkts/sec")
     parser.add_argument("--concurrency", type=int, default=100, help="Concurrent tasks")
 
-    # Timeout arguments
+    # Timeout settings
     parser.add_argument("--timeout-scan", type=float, default=3.0,
                        help="Timeout for scan packets (seconds)")
     parser.add_argument("--timeout-connect", type=float, default=3.0,
@@ -948,10 +1188,9 @@ if __name__ == "__main__":
     parser.add_argument("--timeout-banner", type=float, default=3.0,
                        help="Timeout for banner grabbing (seconds)")
 
-    # ---------------- NEW FLAGS FOR MIMIC & FRAGMENT SCANS ----------------
+    # Fragment scan settings
     parser.add_argument("--mimic-protocol", default="HTTP",
                         help="Protocol to mimic (HTTP, SSH, FTP, etc.) when using 'mimic' scan type.")
-
     parser.add_argument("--frag-min-size", type=int, default=16,
                         help="Minimum fragment size in bytes (multiple of 8) for 'frag' scan.")
     parser.add_argument("--frag-max-size", type=int, default=64,
@@ -962,13 +1201,12 @@ if __name__ == "__main__":
                         help="Maximum delay (seconds) between sending fragments for 'frag' scan.")
     parser.add_argument("--frag-timeout", type=int, default=10,
                         help="Sniffing timeout (seconds) for 'frag' scan response capture.")
-
-    # ---------------- Additional Fragment Config ----------------
     parser.add_argument("--frag-first-min-size", type=int, default=64,
                         help="Minimum size (bytes) for the first fragment to hold the full TCP header.")
     parser.add_argument("--frag-two-frags", action="store_true",
                         help="Use exactly two fragments total (first for TCP header + some data, second for remainder).")
 
+    # Parse args and run the scanner
     args = parser.parse_args()
     logging.getLogger().handlers.clear()
     logging.basicConfig(
