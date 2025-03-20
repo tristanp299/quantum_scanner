@@ -28,10 +28,6 @@ Features
         TTL/Hop Limit: Randomize the IPv4 TTL or IPv6 hlim.
         Fragmentation: Fine-tune fragment size, number of fragments, and timing.
 
-    Rich Output
-        Displays results in a console table with port states, services, version, vulnerabilities, etc.
-        Can also export to JSON.
-
 Installation & Requirements
 
     Python 3.7+ (tested with Python 3.10, 3.11, etc.)
