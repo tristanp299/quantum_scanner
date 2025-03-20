@@ -4,7 +4,142 @@ quantum_scanner.py was originally made to circumvent firewalls and pesky IDS and
 
 So instead of switching my exit node like a normal person I decided to create a port scanner that would utilize quantum computing ciphers and techniques to evade any stoppage.
 
-Well believe it or not that stuff if hard, so for now I made a port scanner that has some special scanning methods that helped me around those walls of fire. 
+Well believe it or not that stuff is hard, so for now I made a port scanner that has some special scanning methods that helped me around those walls of fire. 
+
+Quantum Scanner
+
+Quantum Scanner is a Python-based multi-mode port scanner that offers both conventional TCP/UDP scans (SYN, ACK, FIN, etc.) and additional specialized scans like a fragmented SYN scan and a mimic-based probe. It uses Scapy under the hood for packet crafting and sniffing, plus asyncio to manage concurrent scanning.
+Features
+
+    Multiple Scan Types
+        TCP: SYN, ACK, FIN, XMAS, NULL, WINDOW
+        UDP: Basic open/closed detection without relying heavily on ICMP
+        TLS: SSL probe (to retrieve certificate info) and TLS Echo Mask scans
+        Mimic: Sends a partial protocol banner in the SYN packet (HTTP, SSH, FTP, etc.)
+        Fragmented SYN: Splits the SYN + data into multiple IP fragments, potentially bypassing some firewalls.
+
+    Additional Tools
+        Banner Grabbing: Automatically attempts to read a banner from open TCP ports.
+        Service Fingerprinting: Guesses service based on banner or known ports.
+        Vulnerability Checks: Minimal pattern-based checks (e.g., older Apache or OpenSSH).
+
+    Evasion Options
+        TTL/Hop Limit: Randomize the IPv4 TTL or IPv6 hlim.
+        Fragmentation: Fine-tune fragment size, number of fragments, and timing.
+
+    Rich Output
+        Displays results in a console table with port states, services, version, vulnerabilities, etc.
+        Can also export to JSON.
+
+Installation & Requirements
+
+    Python 3.7+ (tested with Python 3.10, 3.11, etc.)
+    Scapy – Used for packet creation and sniffing
+    cryptography – For SSL certificate parsing
+    rich – Pretty console output and progress bars
+
+Install the dependencies:
+
+pip install scapy cryptography rich
+
+Make sure you have appropriate permissions for raw socket operations:
+
+    Linux: Typically requires root (or CAP_NET_RAW).
+    Mac/Windows: Administrator privileges.
+
+Usage
+
+python3 quantum_scanner.py [OPTIONS] target
+
+Required Arguments
+
+    target: A hostname or IP address (IPv4 or IPv6).
+    -p/--ports: The ports you want to scan. Examples:
+        Single port: -p 80
+        Range of ports: -p 1-100
+        Multiple definitions: -p 22,80,443
+
+Common Scan Types
+
+Use the -s or --scan-types option to select one or more scan types. For example:
+
+-s syn ssl udp ack fin xmas null window tls_echo mimic frag
+
+Defaults to ["syn"] if none are specified.
+Example Command
+
+sudo python3 quantum_scanner.py -p 80,443 -s syn ssl udp ack fin \
+    --verbose 10.0.0.5
+
+Additional Options
+
+    -v, --verbose: Prints debug information.
+    -e, --evasions: Enables additional evasion features (random TTL, fragmentation, etc.).
+    --ipv6: Scans the target via IPv6.
+    --json-output: Also writes results to scan_results.json.
+    --shuffle-ports: Randomizes the port list to help avoid detection.
+    --log-file: Specify a log file path (default scanner.log).
+    --max-rate: Limit max packets/second (default=500).
+    --concurrency: Number of asynchronous tasks (default=100).
+
+Timeouts
+
+    --timeout-scan: Packet receive timeout per scan (default=3.0s)
+    --timeout-connect: TCP connection timeout for banner grabbing or SSL (default=3.0s)
+    --timeout-banner: Banner read timeout (default=3.0s)
+
+Mimic Scan
+
+The mimic scan type sends a partial protocol banner in the TCP SYN packet.
+
+    --mimic-protocol: Choose from "HTTP", "SSH", "FTP", etc. (default=HTTP)
+
+sudo python3 quantum_scanner.py 10.0.0.5 -p 22 -s mimic --mimic-protocol SSH
+
+Fragmented SYN Scan
+
+The frag scan type intentionally splits a single TCP SYN packet + data into multiple IP fragments.
+
+    --frag-min-size & --frag-max-size: Byte range of each fragment (defaults 16-64).
+    --frag-min-delay & --frag-max-delay: Random delay between fragment sends (defaults 0.01-0.1s).
+    --frag-timeout: Sniffer timeout to wait for responses (default=10s).
+
+Additional Fragment Options
+
+    --frag-first-min-size (default=64):
+    Ensures the first fragment is at least this many bytes, so the entire TCP header (and possibly some data) is in fragment #1.
+
+    --frag-two-frags:
+    If used, the script sends exactly two fragments total for each SYN – the first includes the entire TCP header plus some data, the second includes any remaining data. Some firewalls block many-fragment scenarios but allow minimal fragmentation.
+
+Example: Using frag with bigger first fragment and exactly two fragments:
+
+sudo python3 quantum_scanner.py 10.0.0.5 -p 80 -s frag \
+    --frag-first-min-size 128 \
+    --frag-two-frags
+
+Note: Modern firewalls often drop or ignore fragmented SYN packets, so you may see “filtered” even for an open port.
+Output
+
+After each scan completes, results are printed in a Rich table with columns:
+
+    Port
+    TCP states (e.g., syn: open, frag: filtered)
+    UDP state
+    Filtering
+    Service name (heuristic or from banner)
+    Version (from SSL or banner)
+    Vulnerabilities (simple pattern matches)
+    OS Guess (basic TTL-based heuristic)
+
+If --json-output is set, scan_results.json will be generated with the same data in JSON form.
+Development and Contributing
+
+Pull requests and forks are welcome! For suggestions, please open an issue.
+Because the script depends on raw packets, some features require root/administrator access.
+Testing on a local lab or Docker environment without strict firewalls is recommended if you want to see the full effect of advanced fragmentation/evasions.
+
+Disclaimer: This tool is provided for legitimate testing and research only. Be sure to have proper authorization for scanning remote systems.
 
 ## Special Port Scans
 
