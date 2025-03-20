@@ -36,15 +36,15 @@ Installation & Requirements
     rich – Pretty console output and progress bars
 
 Install the dependencies:
-
+```
 pip install scapy cryptography rich
-
+```
 Make sure you have appropriate permissions for raw socket operations:
 
     Linux: Typically requires root (or CAP_NET_RAW).
     Mac/Windows: Administrator privileges.
 
-Usage
+## Usage
 
 python3 quantum_scanner.py [OPTIONS] target
 
@@ -70,7 +70,7 @@ sudo python3 quantum_scanner.py -p 80,443 -s syn ssl udp ack fin \
     --verbose 10.0.0.5
 ```
 Additional Options
-
+```
     -v, --verbose: Prints debug information.
     -e, --evasions: Enables additional evasion features (random TTL, fragmentation, etc.).
     --ipv6: Scans the target via IPv6.
@@ -79,29 +79,29 @@ Additional Options
     --log-file: Specify a log file path (default scanner.log).
     --max-rate: Limit max packets/second (default=500).
     --concurrency: Number of asynchronous tasks (default=100).
-
+```
 Timeouts
-
+```
     --timeout-scan: Packet receive timeout per scan (default=3.0s)
     --timeout-connect: TCP connection timeout for banner grabbing or SSL (default=3.0s)
     --timeout-banner: Banner read timeout (default=3.0s)
-
+```
 Mimic Scan
 
 The mimic scan type sends a partial protocol banner in the TCP SYN packet.
 
     --mimic-protocol: Choose from "HTTP", "SSH", "FTP", etc. (default=HTTP)
-
+```
 sudo python3 quantum_scanner.py 10.0.0.5 -p 22 -s mimic --mimic-protocol SSH
-
+```
 Fragmented SYN Scan
 
 The frag scan type intentionally splits a single TCP SYN packet + data into multiple IP fragments.
-
+```
     --frag-min-size & --frag-max-size: Byte range of each fragment (defaults 16-64).
     --frag-min-delay & --frag-max-delay: Random delay between fragment sends (defaults 0.01-0.1s).
     --frag-timeout: Sniffer timeout to wait for responses (default=10s).
-
+```
 Additional Fragment Options
 
     --frag-first-min-size (default=64):
@@ -130,7 +130,7 @@ After each scan completes, results are printed in a Rich table with columns:
     Vulnerabilities (simple pattern matches)
     OS Guess (basic TTL-based heuristic)
 
-If --json-output is set, scan_results.json will be generated with the same data in JSON form.
+If `--json-output` is set, scan_results.json will be generated with the same data in JSON form.
 
 ## Special Port Scans Explained
 
