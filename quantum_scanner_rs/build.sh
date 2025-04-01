@@ -382,11 +382,14 @@ print_usage() {
     echo -e "  ${GREEN}Scan with specific ports:${NC}"
     echo -e "    quantum_scanner --ports 22,80,443,8080 192.168.1.1"
     echo -e ""
+    echo -e "  ${GREEN}Scan top 100 most common ports:${NC}"
+    echo -e "    quantum_scanner --top-100 192.168.1.1"
+    echo -e ""
     echo -e "  ${GREEN}Multiple scan techniques:${NC}"
     echo -e "    quantum_scanner --scan-types syn,ack,fin 192.168.1.1"
     echo -e ""
-    echo -e "  ${GREEN}Stealth mode with enhanced evasion:${NC}"
-    echo -e "    quantum_scanner --enhanced-evasion --memory-only 192.168.1.1"
+    echo -e "  ${GREEN}Memory-only mode with enhanced evasion:${NC}"
+    echo -e "    quantum_scanner --memory-only --enhanced-evasion 192.168.1.1"
     echo -e ""
     echo -e "  ${GREEN}Scan with protocol mimicry:${NC}"
     echo -e "    quantum_scanner --scan-types mimic --mimic-protocol HTTP 192.168.1.1"
@@ -395,7 +398,7 @@ print_usage() {
     echo -e "    quantum_scanner --output results.txt 192.168.1.1"
     echo -e ""
     echo -e "  ${GREEN}Full scan with all security features:${NC}"
-    echo -e "    quantum_scanner --enhanced-evasion --memory-only --use-tor 192.168.1.1"
+    echo -e "    quantum_scanner --enhanced-evasion --top-100 --use-tor 192.168.1.1"
 }
 
 # Main build process

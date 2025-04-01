@@ -26,8 +26,8 @@ This document outlines the operational security (OpSec) improvements made to Qua
 ### 4. Anti-Forensics
 - Secure deletion of scan artifacts
 - Automatic cleaning of shell history
-- Memory-only operation mode
-- No persistent logs by default
+- Optional memory-only operation mode (via --memory-only flag)
+- Configurable logging options
 
 ## Usage for Red Team Operations
 
@@ -53,10 +53,16 @@ This document outlines the operational security (OpSec) improvements made to Qua
 
 ### Enhanced Scan Profiles
 
+#### Quick Common Port Discovery
+Ideal for rapid enumeration of common services:
+```
+sudo ./run_scanner.sh --top-100 --enhanced-evasion TARGET
+```
+
 #### Low and Slow Reconnaissance
 Ideal for initial target discovery without alerting security systems:
 ```
-sudo ./run_scanner.sh -s fin,null -p 22,80,443,3389,8080 --rate 10 -e TARGET
+sudo ./run_scanner.sh -s fin,null -p 22,80,443,3389,8080 --rate 10 -e --memory-only TARGET
 ```
 
 #### Comprehensive Coverage
@@ -68,7 +74,7 @@ sudo ./run_scanner.sh -s syn,ssl,udp -p 1-10000 -e --timeout 5 TARGET
 #### Evasive Scanning
 For high-security environments with advanced monitoring:
 ```
-sudo ./run_scanner.sh -s frag,mimic -p 80,443,8080,8443 -e TARGET
+sudo ./run_scanner.sh -s frag,mimic -p 80,443,8080,8443 -e --memory-only --use-tor TARGET
 ```
 
 ## Operational Considerations

@@ -14,7 +14,7 @@ mod utils;
 mod output;
 
 use scanner::QuantumScanner;
-use models::{ScanType, PortRange, PortRanges, PortStatus};
+use models::{ScanType, PortRange, PortRanges, PortStatus, TopPorts};
 
 /// Advanced port scanner with evasion capabilities
 #[derive(Parser)]
@@ -28,9 +28,9 @@ struct Args {
     #[clap(short, long, default_value = "1-1000")]
     ports: String,
 
-    /// Enable disk mode (writes files to disk)
-    #[clap(short = 'd', long)]
-    disk_mode: bool,
+    /// Enable memory-only mode (no disk writes)
+    #[clap(short = 'm', long)]
+    memory_only: bool,
 
     /// Scan techniques to use
     #[clap(short, long, value_enum, use_value_delimiter = true, value_delimiter = ',', default_value = "syn")]
@@ -112,10 +112,6 @@ struct Args {
     #[clap(long, default_value = "scanner.log")]
     log_file: PathBuf,
     
-    /// Enable memory-only operation (no disk writes)
-    #[clap(long, default_value_t = true)]
-    memory_only: bool,
-    
     /// Encrypt logs with a password
     #[clap(long, default_value_t = true)]
     encrypt_logs: bool,
@@ -175,6 +171,10 @@ struct Args {
     /// Number of secure delete passes
     #[clap(long, default_value_t = 3)]
     delete_passes: u8,
+
+    /// Scan the top 100 common ports
+    #[clap(short = 't', long)]
+    top_100: bool,
 }
 
 /// Enum for scan types from CLI
@@ -521,11 +521,6 @@ async fn main() -> Result<(), anyhow::Error> {
     // Parse command-line arguments
     let mut args = Args::parse();
     
-    // If disk-mode is specified, override memory-only setting
-    if args.disk_mode {
-        args.memory_only = false;
-    }
-    
     // Setup colors for output
     let colors = Colors::new(args.color);
     
@@ -630,18 +625,26 @@ async fn main() -> Result<(), anyhow::Error> {
         println!("[{}+{}] Enhanced evasion techniques enabled", colors.green, colors.reset);
     }
     
-    // Parse port ranges
-    let port_ranges = match PortRange::parse(&args.ports) {
-        Ok(ranges) => ranges,
-        Err(e) => {
-            error!("Failed to parse port ranges: {}", e);
-            eprintln!("Error: Invalid port range specification");
-            process::exit(1);
-        }
+    // Handle port selection, prioritizing top_100 over ports parameter if specified
+    let ports_to_scan: Vec<u16> = if args.top_100 {
+        let top_ports = TopPorts::top_100();
+        println!("[{}+{}] Using top 100 common ports for scanning", colors.green, colors.reset);
+        top_ports
+    } else {
+        // Parse port ranges
+        let port_ranges = match PortRange::parse(&args.ports) {
+            Ok(ranges) => ranges,
+            Err(e) => {
+                error!("Failed to parse port ranges: {}", e);
+                eprintln!("Error: Invalid port range specification");
+                process::exit(1);
+            }
+        };
+        
+        // Expand port ranges into a list of ports
+        PortRanges::new(port_ranges).into_iter().collect()
     };
     
-    // Expand port ranges into a list of ports
-    let ports_to_scan: Vec<u16> = PortRanges::new(port_ranges).into_iter().collect();
     if ports_to_scan.is_empty() {
         error!("No valid ports specified");
         eprintln!("Error: Invalid port range specification");

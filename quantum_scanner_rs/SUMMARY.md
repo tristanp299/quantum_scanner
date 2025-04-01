@@ -84,7 +84,16 @@ Additional improvements that could be made:
 3. Implement automatic target validation to prevent scanning unauthorized systems
 4. Improve error handling for better operational security
 5. Add more extensive logging options with encryption
-6. Implement memory-only operation mode to avoid any disk writes
+
+## Recent Updates
+
+Recent enhancements to Quantum Scanner include:
+
+1. **Default Disk Mode**: Changed default operation to disk mode for greater reliability and persistence
+2. **Optional Memory-Only Mode**: Added `--memory-only` flag for situations requiring minimal footprint
+3. **Top 100 Ports Scanning**: Added `--top-100` flag for quick scanning of most common ports
+4. **Improved Performance**: Enhanced scanning engine for better efficiency and accuracy
+5. **Better Documentation**: Updated usage examples and documentation
 
 ## Testing Results
 
