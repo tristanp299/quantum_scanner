@@ -7,12 +7,13 @@ description = "Advanced port scanner with evasion capabilities"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1.28", features = ["full", "time"] }
 
 # Network packet manipulation
 pnet = "0.33.0"
 pnet_macros_support = "0.33.0"
 pnet_packet = "0.33.0"
+pnet_sys = "0.33.0"
 socket2 = "0.5.3"
 
 # TLS/SSL support
@@ -21,21 +22,31 @@ rustls-pemfile = "1.0.2"
 webpki-roots = "0.23.0"
 x509-parser = "0.15.0"
 
+# Cryptography
+sha2 = "0.10.6"
+aes-gcm = "0.10.2"
+
 # Terminal UI
 indicatif = "0.17.3"
 console = "0.15.5"
 dialoguer = "0.10.4"
 crossterm = "0.26.1"
+colored = "2.0.0"
+
+# File system and security
+tempfile = "3.5.0"
+# Need to enable these features for secure random and password generation
+rand = { version = "0.8.5", features = ["std", "std_rng"] }
 
 # Utility
 clap = { version = "4.2.7", features = ["derive"] }
-rand = "0.8.5"
 log = "0.4.17"
 env_logger = "0.10.0"
 chrono = { version = "0.4.24", features = ["serde"] }
 anyhow = "1.0.71"
 thiserror = "1.0.40"
 parking_lot = "0.12.1"
+libc = "0.2.139"
 
 # Serialization
 serde = { version = "1.0.163", features = ["derive"] }

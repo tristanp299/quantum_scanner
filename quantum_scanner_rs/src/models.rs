@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+use std::ops::RangeInclusive;
 use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
@@ -264,14 +265,24 @@ impl Iterator for PortRangeIterator {
     }
 }
 
+/// Wrapper struct for Vec<PortRange> to avoid orphan rule issues
+#[derive(Debug)]
+pub struct PortRanges(pub Vec<PortRange>);
+
+impl PortRanges {
+    pub fn new(ranges: Vec<PortRange>) -> Self {
+        PortRanges(ranges)
+    }
+}
+
 /// Iterator for a collection of port ranges
-impl IntoIterator for Vec<PortRange> {
+impl IntoIterator for PortRanges {
     type Item = u16;
     type IntoIter = PortRangesIterator;
     
     fn into_iter(self) -> Self::IntoIter {
         PortRangesIterator {
-            ranges: self,
+            ranges: self.0,
             current_range_index: 0,
             current_iter: None,
         }

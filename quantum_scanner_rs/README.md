@@ -6,6 +6,9 @@ An advanced port scanner with evasion capabilities written in Rust.
 
 - **Multiple Scan Techniques**: SYN, ACK, FIN, XMAS, NULL, SSL, UDP, and more
 - **Stealthy Evasion**: Fragmentation, protocol mimicry, TLS echo scans
+- **Enhanced Security**: Memory-only operation, RAM disk support, secure cleanup
+- **Advanced Evasion**: OS fingerprint spoofing, TTL jittering, protocol mimicry
+- **Tor Integration**: Optional traffic routing through Tor (when available)
 - **Performance**: High-speed concurrent scanning leveraging Rust's async capabilities
 - **Service Detection**: Identifies services running on open ports
 - **SSL Analysis**: Examines SSL/TLS certificates and configuration
@@ -46,7 +49,17 @@ brew install libpcap
 ```
 git clone https://github.com/yourusername/quantum_scanner_rs.git
 cd quantum_scanner_rs
-cargo build --release
+./build.sh
+```
+
+For additional build options:
+```
+./build.sh --help
+```
+
+To install the binary system-wide (requires root):
+```
+sudo ./build.sh --install
 ```
 
 The compiled binary will be in `target/release/quantum_scanner`.
@@ -61,52 +74,70 @@ quantum_scanner [OPTIONS] <TARGET>
 Examples:
 ```
 # Simple SYN scan of common ports on a single host
-quantum_scanner -s syn 192.168.1.1
+quantum_scanner 192.168.1.1
 
 # Comprehensive scan of a host with multiple techniques
-quantum_scanner -s syn,fin,ssl,udp -p 1-1000 192.168.1.1
+quantum_scanner --scan-types syn,fin,ssl,udp --ports 1-1000 192.168.1.1
 
-# Stealthy fragmented scan with evasion techniques
-quantum_scanner -s frag -e -p 80,443,8080 192.168.1.1
+# Stealthy scan with evasion techniques
+quantum_scanner --evasion 192.168.1.1
+
+# Scan with protocol mimicry
+quantum_scanner --scan-types mimic --mimic-protocol HTTP 192.168.1.1
 
 # Scan an entire subnet
-quantum_scanner -s syn -p 22,80,443 192.168.1.0/24
+quantum_scanner --scan-types syn --ports 22,80,443 192.168.1.0/24
+
+# Enable disk mode to write logs to disk (memory-only is default)
+quantum_scanner -d 192.168.1.1
 ```
 
 ## Command-line Options
 
+Basic options:
 ```
-USAGE:
-    quantum_scanner [OPTIONS] <TARGET>
-
-ARGS:
-    <TARGET>    Target IP address, hostname, or CIDR notation for subnet
-
-OPTIONS:
-    -p, --ports <PORTS>                Ports to scan (comma-separated, ranges like 1-1000)
-    -s, --scan-types <SCAN_TYPES>      Scan techniques to use [default: syn]
-                                       [possible values: syn, ack, fin, xmas, null, window, ssl, udp, tls_echo, mimic, frag]
-    -c, --concurrency <CONCURRENCY>    Maximum concurrent operations [default: 100]
-    -r, --rate <RATE>                  Maximum packets per second [default: 500]
-    -e, --evasion                      Enable evasion techniques
-    -v, --verbose                      Enable verbose output
-    -6, --ipv6                         Use IPv6
-    -j, --json                         Output results in JSON format
-    -o, --output <FILE>                Write results to file
-    -t, --timeout <SECONDS>            Scan timeout in seconds [default: 3.0]
-    -h, --help                         Print help information
-    -V, --version                      Print version information
+<TARGET>                Target IP address, hostname, or CIDR notation for subnet
+-p, --ports             Ports to scan (comma-separated, ranges like 1-1000) [default: 1-1000]
+-s, --scan-types        Scan techniques to use [default: syn]
+                        [possible values: syn, ack, fin, xmas, null, window, ssl, udp, tls_echo, mimic, frag]
+-c, --concurrency       Maximum concurrent operations [default: 100]
+-o, --output            Write results to file
+-j, --json              Output results in JSON format
+-v, --verbose           Enable verbose output
+-d, --disk-mode         Enable disk mode (writes logs and data to disk)
+-h, --help              Print help information
+-V, --version           Print version information
 ```
 
-## Improvements over Python Version
+Evasion options:
+```
+-e, --evasion           Enable evasion techniques
+--mimic-protocol        Protocol to mimic in mimic scans [default: HTTP]
+--mimic-os              Operating system to mimic (windows, linux, macos, random)
+--ttl-jitter            TTL jitter amount for enhanced evasion (1-5) [default: 2]
+```
 
-- Faster execution using Rust's zero-cost abstractions
-- Improved memory safety and thread safety
-- More efficient async I/O with Tokio
-- Better error handling with Rust's Result type
-- No runtime dependencies once compiled
-- More granular rate limiting and adaptive timing
-- Enhanced packet crafting capabilities
+Performance options:
+```
+-r, --rate              Maximum packets per second (0 for automatic rate) [default: 0]
+-t, --timeout           Scan timeout in seconds [default: 3.0]
+```
+
+## Enhanced Security Features
+
+### Memory-Only Operation
+
+By default, Quantum Scanner operates in memory-only mode to avoid leaving sensitive data on disk:
+
+```
+quantum_scanner target.com
+```
+
+To enable disk mode and write logs to disk:
+
+```
+quantum_scanner -d target.com
+```
 
 ## License
 

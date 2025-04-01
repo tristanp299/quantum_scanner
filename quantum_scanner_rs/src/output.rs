@@ -1,11 +1,11 @@
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::Path;
+use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use console::{style, Term};
-use log::debug;
 use serde_json;
 
 use crate::models::{PortResult, PortStatus, ScanResults, ScanType};
@@ -30,6 +30,145 @@ pub fn save_json_results(results: &ScanResults, output_path: &Path) -> Result<()
     Ok(())
 }
 
+/// Convert scan results to a simple text report format
+pub fn format_text_results(results: &ScanResults) -> String {
+    let mut output = String::new();
+    
+    // Header
+    output.push_str(&format!("# Quantum Scanner Report\n"));
+    output.push_str(&format!("Target: {}\n", results.target));
+    output.push_str(&format!("IP: {}\n", results.target_ip));
+    output.push_str(&format!("Timestamp: {}\n", Utc::now()));
+    output.push_str(&format!("Scan Duration: {:.2} seconds\n", 
+        results.end_time.signed_duration_since(results.start_time).num_milliseconds() as f64 / 1000.0));
+    
+    // Scan types used
+    output.push_str("Scan types: ");
+    for (i, scan_type) in results.scan_types.iter().enumerate() {
+        if i > 0 {
+            output.push_str(", ");
+        }
+        output.push_str(&scan_type.to_string());
+    }
+    output.push_str("\n\n");
+    
+    // Open ports summary
+    output.push_str(&format!("## Open Ports Summary\n"));
+    if results.open_ports.is_empty() {
+        output.push_str("No open ports found\n\n");
+    } else {
+        output.push_str(&format!("Found {} open ports:\n\n", results.open_ports.len()));
+        output.push_str("PORT      STATE   SERVICE         VERSION\n");
+        output.push_str("----------------------------------------------------\n");
+        
+        // Sort ports for consistent output
+        let mut ports: Vec<u16> = results.open_ports.iter().copied().collect();
+        ports.sort_unstable();
+        
+        for port in ports {
+            if let Some(port_result) = results.results.get(&port) {
+                // Find the first open state
+                let state = if port_result.tcp_states.values().any(|s| *s == PortStatus::Open) {
+                    "open"
+                } else if port_result.udp_state == Some(PortStatus::Open) {
+                    "open/udp"
+                } else {
+                    "open|filtered"
+                };
+                
+                let service = port_result.service.as_deref().unwrap_or("unknown");
+                let version = port_result.version.as_deref().unwrap_or("");
+                
+                output.push_str(&format!("{:<9} {:<7} {:<15} {}\n", 
+                    port, state, service, version));
+            }
+        }
+        output.push_str("\n");
+    }
+    
+    // Detailed port information
+    output.push_str("## Port Details\n\n");
+    
+    // Sort ports for consistent output
+    let mut all_ports: Vec<u16> = results.results.keys().copied().collect();
+    all_ports.sort_unstable();
+    
+    for port in all_ports {
+        let port_result = &results.results[&port];
+        
+        // Skip ports with no interesting results
+        let has_data = !port_result.tcp_states.is_empty() 
+            || port_result.udp_state.is_some()
+            || port_result.banner.is_some()
+            || port_result.cert_info.is_some();
+            
+        if !has_data {
+            continue;
+        }
+        
+        output.push_str(&format!("### Port {}\n", port));
+        
+        // Service information
+        if let Some(service) = &port_result.service {
+            output.push_str(&format!("Service: {}\n", service));
+        }
+        
+        if let Some(version) = &port_result.version {
+            output.push_str(&format!("Version: {}\n", version));
+        }
+        
+        // States by scan type
+        if !port_result.tcp_states.is_empty() {
+            output.push_str("TCP States:\n");
+            for (scan_type, status) in &port_result.tcp_states {
+                output.push_str(&format!("  - {} scan: {}\n", scan_type, status));
+            }
+        }
+        
+        if let Some(udp_state) = &port_result.udp_state {
+            output.push_str(&format!("UDP State: {}\n", udp_state));
+        }
+        
+        // Banner if available
+        if let Some(banner) = &port_result.banner {
+            output.push_str("Banner:\n");
+            // Sanitize and format the banner
+            let sanitized = sanitize_banner(banner);
+            for line in sanitized.lines().take(5) {
+                output.push_str(&format!("  {}\n", line));
+            }
+        }
+        
+        // Certificate info if available
+        if let Some(cert) = &port_result.cert_info {
+            output.push_str("SSL/TLS Certificate:\n");
+            output.push_str(&format!("  Subject: {}\n", cert.subject));
+            output.push_str(&format!("  Issuer: {}\n", cert.issuer));
+            output.push_str(&format!("  Valid from: {}\n", cert.not_before));
+            output.push_str(&format!("  Valid until: {}\n", cert.not_after));
+            
+            if !cert.alt_names.is_empty() {
+                output.push_str("  Alternative Names:\n");
+                for name in &cert.alt_names {
+                    output.push_str(&format!("    - {}\n", name));
+                }
+            }
+        }
+        
+        // Vulnerabilities if found
+        if !port_result.vulns.is_empty() {
+            output.push_str("Vulnerabilities:\n");
+            for vuln in &port_result.vulns {
+                output.push_str(&format!("  - {}\n", vuln));
+            }
+        }
+        
+        output.push_str("\n");
+    }
+    
+    output
+}
+
 /// Save scan results as formatted text
 ///
 /// # Arguments
@@ -39,45 +178,12 @@ pub fn save_json_results(results: &ScanResults, output_path: &Path) -> Result<()
 /// # Returns
 /// * `Result<()>` - Success or error
 pub fn save_text_results(results: &ScanResults, output_path: &Path) -> Result<()> {
+    let text = format_text_results(results);
     let mut file = File::create(output_path)
-        .with_context(|| format!("Failed to create output file: {:?}", output_path))?;
+        .context(format!("Failed to create output file: {:?}", output_path))?;
     
-    // Format header
-    let header = format!(
-        "# Quantum Scanner Results\n\
-         Target: {}\n\
-         IP: {}\n\
-         Scan Time: {} to {}\n\
-         Scan Types: {}\n\
-         Open Ports: {}\n\n",
-        results.target,
-        results.target_ip,
-        results.start_time.format("%Y-%m-%d %H:%M:%S"),
-        results.end_time.format("%Y-%m-%d %H:%M:%S"),
-        results.scan_types.iter()
-            .map(|st| format!("{}", st))
-            .collect::<Vec<_>>()
-            .join(", "),
-        results.open_ports.len()
-    );
-    
-    file.write_all(header.as_bytes())?;
-    
-    // Format each port result
-    if results.open_ports.is_empty() {
-        file.write_all(b"No open ports found.\n")?;
-    } else {
-        file.write_all(b"## Open Ports\n\n")?;
-        
-        let mut ports: Vec<_> = results.open_ports.iter().collect();
-        ports.sort_unstable();
-        
-        for &port in ports {
-            if let Some(port_result) = results.results.get(port) {
-                format_port_text(&mut file, port, port_result)?;
-            }
-        }
-    }
+    file.write_all(text.as_bytes())
+        .context("Failed to write text results")?;
     
     Ok(())
 }
@@ -188,7 +294,7 @@ pub fn print_results(results: &ScanResults) -> Result<()> {
     ports.sort_unstable();
     
     for &port in ports {
-        if let Some(result) = results.results.get(port) {
+        if let Some(result) = results.results.get(&port) {
             print_port_summary(port, result);
         }
     }
@@ -222,7 +328,7 @@ fn print_detailed_results(results: &ScanResults) -> Result<()> {
     ports.sort_unstable();
     
     for &port in ports {
-        if let Some(result) = results.results.get(port) {
+        if let Some(result) = results.results.get(&port) {
             // Only print detailed info if there's something interesting
             let has_details = result.banner.is_some() || 
                               result.cert_info.is_some() || 
@@ -287,4 +393,145 @@ fn format_duration(seconds: f64) -> String {
         let secs = seconds - (minutes * 60.0);
         format!("{}m {:.2}s", minutes as u32, secs)
     }
+}
+
+/// Print open ports to the console
+pub fn print_open_ports(results: &ScanResults) -> Result<()> {
+    println!("{}", style("OPEN PORTS:").cyan().bold());
+    println!("{}", style("PORT      STATE   SERVICE").cyan());
+    println!("{}", style("------------------------").cyan());
+    
+    if results.open_ports.is_empty() {
+        println!("No open ports found");
+        return Ok(());
+    }
+    
+    // Sort ports for consistent output
+    let mut ports: Vec<u16> = results.open_ports.iter().copied().collect();
+    ports.sort_unstable();
+    
+    for port in ports {
+        if let Some(result) = results.results.get(&port) {
+            let service = result.service.as_deref().unwrap_or("unknown");
+            println!("{:<9} {:<7} {}", 
+                style(port).green(), 
+                style("open").green(), 
+                style(service).green());
+        }
+    }
+    
+    Ok(())
+}
+
+/// Print detailed port information to the console
+pub fn print_port_details(results: &ScanResults, port: u16) -> Result<()> {
+    if let Some(result) = results.results.get(&port) {
+        println!("{} {}", style("PORT DETAILS:").cyan().bold(), style(port).cyan());
+        println!("{}", style("------------------------").cyan());
+        
+        // Service information
+        if let Some(service) = &result.service {
+            println!("{}: {}", style("Service").yellow(), service);
+        }
+        
+        if let Some(version) = &result.version {
+            println!("{}: {}", style("Version").yellow(), version);
+        }
+        
+        // States by scan type
+        if !result.tcp_states.is_empty() {
+            println!("{}: ", style("TCP States").yellow());
+            for (scan_type, status) in &result.tcp_states {
+                println!("  {} scan: {}", scan_type, status);
+            }
+        }
+        
+        if let Some(udp_state) = &result.udp_state {
+            println!("{}: {}", style("UDP State").yellow(), udp_state);
+        }
+        
+        // Banner if available
+        if let Some(banner) = &result.banner {
+            println!("{}:", style("Banner").yellow());
+            let sanitized = sanitize_banner(banner);
+            for line in sanitized.lines().take(5) {
+                println!("  {}", line);
+            }
+        }
+        
+        // Certificate info if available
+        if let Some(cert) = &result.cert_info {
+            println!("{}:", style("SSL/TLS Certificate").yellow());
+            println!("  Subject: {}", cert.subject);
+            println!("  Issuer: {}", cert.issuer);
+            println!("  Valid from: {}", cert.not_before);
+            println!("  Valid until: {}", cert.not_after);
+        }
+        
+        // Vulnerabilities if found
+        if !result.vulns.is_empty() {
+            println!("{}:", style("Vulnerabilities").yellow().bold());
+            for vuln in &result.vulns {
+                println!("  - {}", style(vuln).red());
+            }
+        }
+    } else {
+        println!("No information available for port {}", port);
+    }
+    
+    Ok(())
+}
+
+/// Sanitize banner string for display
+fn sanitize_banner(banner: &str) -> String {
+    // Replace control characters with visible representations
+    banner.chars()
+        .map(|c| {
+            if c.is_ascii_control() && c != '\n' && c != '\r' && c != '\t' {
+                format!("\\x{:02x}", c as u8)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Export results to CSV format
+pub fn export_to_csv(results: &ScanResults, writer: &mut dyn Write) -> Result<()> {
+    // Write CSV header
+    writeln!(writer, "port,state,service,version,banner")?;
+    
+    // Sort ports for consistent output
+    let mut ports: Vec<u16> = results.results.keys().copied().collect();
+    ports.sort_unstable();
+    
+    for port in ports {
+        if let Some(result) = results.results.get(&port) {
+            // Find the most open state
+            let state = if result.tcp_states.values().any(|s| *s == PortStatus::Open) {
+                "open"
+            } else if result.udp_state == Some(PortStatus::Open) {
+                "open/udp"
+            } else if result.tcp_states.values().any(|s| *s == PortStatus::OpenFiltered) {
+                "open|filtered"
+            } else if !result.tcp_states.is_empty() {
+                "closed"
+            } else {
+                "unknown"
+            };
+            
+            let service = result.service.as_deref().unwrap_or("").replace(",", "");
+            let version = result.version.as_deref().unwrap_or("").replace(",", "");
+            
+            // Take first line of banner and escape quotes, commas
+            let banner = match &result.banner {
+                Some(b) => b.lines().next().unwrap_or("").replace("\"", "\"\"").replace(",", "\\,"),
+                None => String::new(),
+            };
+            
+            writeln!(writer, "{},{},{},{},\"{}\"", port, state, service, version, banner)?;
+        }
+    }
+    
+    Ok(())
 } 
