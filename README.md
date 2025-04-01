@@ -1,188 +1,194 @@
-# quantum_scanner
+# Quantum Scanner
 
-## Author Comments
+A sophisticated port scanner designed to evade firewalls and IDS/EDR systems using specialized scanning techniques.
 
-quantum_scanner.py was originally made to circumvent firewalls and pesky IDS and EDRs that would stop my enumeration mid scan. BOOO! 
+## Overview
 
-So instead of switching my exit node like a normal person I decided to create a port scanner that would utilize quantum computing ciphers and techniques to evade any stoppage.
+Quantum Scanner is an advanced multi-mode port scanner built in Python that offers comprehensive TCP/UDP scanning capabilities, including standard methods (SYN, ACK, FIN, etc.) and specialized evasion techniques like fragmented SYN scanning and protocol mimicry. It leverages Scapy for packet crafting and asyncio for efficient concurrent scanning.
 
-Well believe it or not that stuff is hard, so for now I made a port scanner that has some special scanning methods that helped me around those walls of fire. 
+## Key Features
 
-## What is this thing?
+- **Multiple Scan Types**
+  - **TCP Scans**: SYN, ACK, FIN, XMAS, NULL, WINDOW
+  - **UDP Scan**: Basic open/closed detection without ICMP dependency
+  - **TLS Scans**: SSL probe (certificate analysis) and TLS Echo Mask scan
+  - **Mimic Scan**: Sends protocol-specific banners in SYN packets (HTTP, SSH, FTP, etc.)
+  - **Fragmented SYN**: Splits packets into multiple IP fragments to bypass firewall detection
 
-Quantum Scanner is a Python-based multi-mode port scanner that offers both TCP/UDP scans (SYN, ACK, FIN, etc.) and additional specialized scans like a fragmented SYN scan and a mimic-based probe. It uses Scapy under the hood for packet crafting and sniffing, plus asyncio to manage concurrent scanning.
+- **Additional Capabilities**
+  - **Banner Grabbing**: Automatically retrieves service banners from open TCP ports
+  - **Service Fingerprinting**: Identifies services based on banners and port information
+  - **Vulnerability Detection**: Basic identification of security issues
 
-Features:
+- **Evasion Techniques**
+  - **TTL/Hop Limit Randomization**: Varies IPv4 TTL or IPv6 hop limit values
+  - **Customizable Fragmentation**: Control fragment sizes, counts, and timing
+  - **Protocol Mimicry**: Disguises scan packets as legitimate protocol responses
 
-    Multiple Scan Types
-        TCP: SYN, ACK, FIN, XMAS, NULL, WINDOW
-        UDP: Basic open/closed detection without relying heavily on ICMP
-        TLS: SSL probe (to retrieve certificate info) and TLS Echo Mask scans
-        Mimic: Sends a partial protocol banner in the SYN packet (HTTP, SSH, FTP, etc.)
-        Fragmented SYN: Splits the SYN + data into multiple IP fragments, potentially bypassing some firewalls.
+## Installation
 
-    Additional Tools
-        Banner Grabbing: Automatically attempts to read a banner from open TCP ports.
-        Service Fingerprinting: Guesses service based on banner or known ports.
+### Prerequisites
 
-    Evasion Options
-        TTL/Hop Limit: Randomize the IPv4 TTL or IPv6 hlim.
-        Fragmentation: Fine-tune fragment size, number of fragments, and timing.
+- Python 3.7+ (tested with Python 3.10, 3.11)
+- Appropriate permissions for raw socket operations:
+  - Linux: Root access or CAP_NET_RAW capability
+  - macOS/Windows: Administrator privileges
 
-Installation & Requirements
+### Dependencies
 
-    Python 3.7+ (tested with Python 3.10, 3.11, etc.)
-    Scapy – Used for packet creation and sniffing
-    cryptography – For SSL certificate parsing
-    rich – Pretty console output and progress bars
-
-Install the dependencies:
-```
+```bash
 pip install scapy cryptography rich
 ```
-Make sure you have appropriate permissions for raw socket operations:
-
-    Linux: Typically requires root (or CAP_NET_RAW).
-    Mac/Windows: Administrator privileges.
 
 ## Usage
-```
-python3 quantum_scanner.py [OPTIONS] target
-```
-Required Arguments
 
-    target: A hostname or IP address (IPv4 or IPv6).
-    -p/--ports: The ports you want to scan. Examples:
-        Single port: -p 80
-        Range of ports: -p 1-100
-        Multiple definitions: -p 22,80,443
+### Basic Command Syntax
 
-Common Scan Types
-
-Use the -s or --scan-types option to select one or more scan types. For example:
+```bash
+sudo python3 quantum_scanner.py [OPTIONS] target
 ```
+
+### Required Arguments
+
+- `target`: Hostname or IP address (IPv4 or IPv6)
+- `-p/--ports`: Ports to scan, using any of these formats:
+  - Single port: `-p 80`
+  - Port range: `-p 1-100`
+  - Multiple ports: `-p 22,80,443`
+
+### Scan Type Selection
+
+Use `-s` or `--scan-types` to select scan methods:
+
+```bash
 -s syn ssl udp ack fin xmas null window tls_echo mimic frag
 ```
-Defaults to ["syn"] if none are specified.
+
+If no scan type is specified, `syn` is used by default.
+
+### Example Commands
+
+Basic scan with multiple methods:
+```bash
+sudo python3 quantum_scanner.py -p 80,443 -s syn ssl udp --verbose 10.0.0.5
+```
+
+Full stealth scan with evasion techniques:
+```bash
+sudo python3 quantum_scanner.py -p 22,80,443 -s fin frag mimic --evasions --shuffle-ports 10.0.0.5
+```
+
+### Common Options
+
+```
+-v, --verbose         Print detailed debugging information
+-e, --evasions        Enable additional evasion techniques
+--ipv6                Use IPv6 for scanning
+--json-output         Write results to scan_results.json
+--shuffle-ports       Randomize port scanning order for detection avoidance
+--log-file FILE       Specify custom log file path (default: scanner.log)
+--max-rate N          Limit scanning rate to N packets/second (default: 500)
+--concurrency N       Number of concurrent scanning tasks (default: 100)
+```
+
+### Timeout Settings
+
+```
+--timeout-scan N      Packet receive timeout in seconds (default: 3.0)
+--timeout-connect N   TCP connection timeout in seconds (default: 3.0)
+--timeout-banner N    Banner read timeout in seconds (default: 3.0)
+```
+
+## Advanced Scan Configuration
+
+### Mimic Scan
+
+The mimic scan sends partial protocol banners in TCP SYN packets to disguise the scan:
+
+```
+--mimic-protocol PROTOCOL   Protocol to mimic: HTTP, SSH, FTP, SMTP, IMAP, POP3 (default: HTTP)
+```
 
 Example:
-```
-sudo python3 quantum_scanner.py -p 80,443 -s syn ssl udp ack fin \
-    --verbose 10.0.0.5
-```
-Additional Options
-```
-    -v, --verbose: Prints debug information.
-    -e, --evasions: Enables additional evasion features (random TTL, fragmentation, etc.).
-    --ipv6: Scans the target via IPv6.
-    --json-output: Also writes results to scan_results.json.
-    --shuffle-ports: Randomizes the port list to help avoid detection.
-    --log-file: Specify a log file path (default scanner.log).
-    --max-rate: Limit max packets/second (default=500).
-    --concurrency: Number of asynchronous tasks (default=100).
-```
-Timeouts
-```
-    --timeout-scan: Packet receive timeout per scan (default=3.0s)
-    --timeout-connect: TCP connection timeout for banner grabbing or SSL (default=3.0s)
-    --timeout-banner: Banner read timeout (default=3.0s)
-```
-Mimic Scan
-
-The mimic scan type sends a partial protocol banner in the TCP SYN packet.
-
-    --mimic-protocol: Choose from "HTTP", "SSH", "FTP", "SMTP", "IMAP", "POP3" (default=HTTP)
-```
+```bash
 sudo python3 quantum_scanner.py 10.0.0.5 -p 22 -s mimic --mimic-protocol SSH
 ```
-Fragmented SYN Scan
 
-The frag scan type intentionally splits a single TCP SYN packet + data into multiple IP fragments.
+### Fragmented SYN Scan
+
+This scan splits TCP SYN packets into multiple IP fragments to evade detection:
+
 ```
-    --frag-min-size & --frag-max-size: Byte range of each fragment (defaults 16-64).
-    --frag-min-delay & --frag-max-delay: Random delay between fragment sends (defaults 0.01-0.1s).
-    --frag-timeout: Sniffer timeout to wait for responses (default=10s).
+--frag-min-size N     Minimum fragment size in bytes (default: 16)
+--frag-max-size N     Maximum fragment size in bytes (default: 64)
+--frag-min-delay N    Minimum delay between fragments in seconds (default: 0.01)
+--frag-max-delay N    Maximum delay between fragments in seconds (default: 0.1)
+--frag-timeout N      Timeout for fragmented scan response in seconds (default: 10)
+--frag-first-min-size N  Minimum size for first fragment in bytes (default: 64)
+--frag-two-frags      Use exactly two fragments per packet
 ```
-Additional Fragment Options
 
-    --frag-first-min-size (default=64):
-    Ensures the first fragment is at least this many bytes, so the entire TCP header (and possibly some data) is in fragment #1.
-
-    --frag-two-frags:
-    If used, the script sends exactly two fragments total for each SYN – the first includes the entire TCP header plus some data, the second includes any remaining data. Some firewalls block many-fragment scenarios but allow minimal fragmentation.
-
-Example: Using frag with bigger first fragment and exactly two fragments:
+Example:
+```bash
+sudo python3 quantum_scanner.py 10.0.0.5 -p 80 -s frag --frag-first-min-size 128 --frag-two-frags
 ```
-sudo python3 quantum_scanner.py 10.0.0.5 -p 80 -s frag \
-    --frag-first-min-size 128 \
-    --frag-two-frags
-```
-Note: Modern firewalls often drop or ignore fragmented SYN packets, so you may see “filtered” even for an open port.
-Output
 
-After each scan completes, results are printed in a Rich table with columns:
+> **Note**: Many modern firewalls detect or drop fragmented SYN packets. Results showing "filtered" may indicate this behavior rather than an actual closed port.
 
-    Port
-    TCP states (e.g., syn: open, frag: filtered)
-    UDP state
-    Filtering
-    Service name (heuristic or from banner)
-    Version (from SSL or banner)
-    Vulnerabilities (simple pattern matches)
-    OS Guess (basic TTL-based heuristic)
+## Scan Results
 
-If `--json-output` is set, scan_results.json will be generated with the same data in JSON form.
+Results are presented in a formatted table with columns showing:
 
-## Special Port Scans Explained
+- Port number
+- TCP state (per scan type)
+- UDP state
+- Firewall filtering status
+- Service identification
+- Version information (from SSL or banners)
+- Potential vulnerabilities
+- OS fingerprinting results
+
+When using `--json-output`, complete results are saved to `scan_results.json`.
+
+## Advanced Scan Techniques Explained
 
 ### TLS Echo Mask Scan
 
-Designed to evade firewalls by disguising TCP SYN packets as part of a TLS handshake response (specifically, a Server Hello message). Since ICMP traffic is often blocked, this approach uses TLS. The scanner crafts packets that appear as responses to a non-existent client handshake, slipping past firewalls that don’t perform full TLS state tracking or deep packet inspection.
+This technique attempts to bypass firewalls by disguising TCP SYN packets as TLS handshake responses (Server Hello messages). Since this makes the packets appear as responses to legitimate client handshake requests, it may evade firewalls that:
 
-- Create a TCP SYN packet with a payload mimicking a TLS Server Hello message (TLS record type 22, handshake type 2). This makes it look like the target requested a TLS connection, and this is the server’s reply.
+- Allow TLS traffic on standard ports
+- Don't perform deep packet inspection
+- Lack full TLS state tracking capability
 
-Note:
-- Traditional scans don’t hide behind TLS handshake responses, giving this an edge against signature-based detection.
-- Firewalls permitting TLS traffic (e.g., port 443) may allow this packet if they don’t inspect payloads or enforce strict handshake state tracking.
-- Firewalls with TLS decryption or advanced stateful inspection might detect the lack of a prior Client Hello, so it’s not foolproof against high-end setups.
+The scanner crafts packets with TLS record type 22 (handshake) and handshake type 2 (Server Hello) to simulate a TLS response.
 
-### Protocol Mimic Scan 
+### Protocol Mimic Scan
 
-Sends a SYN packet with a payload from mimic_payloads to disguise the scan as a legitimate protocol response.
+This scan sends SYN packets with partial protocol response data that matches the expected protocol for common services:
 
-    - Constructs a packet with IP / TCP(SYN) / Raw(payload).
-    - Sends it using Scapy’s sr1() and waits for a response.
-    - Analyzes the TCP flags: SYN-ACK (open), RST (closed), or no response (filtered).
+- Constructs IP/TCP(SYN)/Raw(payload) packets with payloads matching HTTP, SSH, FTP, etc.
+- Analyzes responses: SYN-ACK (open), RST (closed), or no response (filtered)
 
-Note: 
-- Firewalls allowing HTTP traffic on port 80 might permit a SYN packet with an HTTP payload, even if unsolicited.
-- SSH traffic on port 22 or FTP on port 21 might be allowed if the payload matches expected protocol responses.
+This can bypass firewalls that allow certain protocols on their standard ports, even for unsolicited traffic.
 
-### Fragmented SYN Scan Function
+### Fragmented SYN Scan
 
-Performs a SYN scan by fragmenting the packet into multiple IP fragments with randomized sizes and sending delays to evade detection.
+This technique attempts to avoid detection by splitting single SYN packets into multiple IP fragments:
 
-    - Randomized Fragment Sizes: Splits a 1400-byte payload into fragments between min_frag_size and max_frag_size (multiples of 8 bytes).
-    - Randomized Delays: Adds delays between fragments (between min_delay and max_delay) to make traffic less predictable.
-    - Proper Fragmentation: Sets correct fragment offsets and "More Fragments" (MF) flags for reassembly.
-    - Response Handling: Uses a separate sniffing thread to capture SYN-ACK or RST responses.
+- **Randomized Fragment Sizes**: Split payloads into fragments between min_frag_size and max_frag_size
+- **Randomized Delays**: Add timing variations between fragment transmission
+- **Proper Fragmentation**: Set correct fragment offsets and MF flags for proper reassembly
+- **Customizable First Fragment**: Ensure TCP header is fully contained in first fragment
 
-Note: 
-- IP fragment offsets are in 8-byte units, and payload sizes (except the last) are multiples of 8 to ensure proper reassembly by the target.
-- SYN packets with large payloads are non-standard, potentially bypassing DPI rules focused on typical scans.
+Fragment parameters can be fine-tuned:
 
-##### Important fragmentation flags
+- `--frag-first-min-size`: Ensures first fragment includes complete TCP header plus initial data
+- `--frag-two-frags`: Uses exactly two fragments per packet for minimal fragmentation scenarios
 
-- --frag-first-min-size:
-Ensures the first fragment has room for the entire TCP header (often up to 60 bytes with options) plus some data.
+## Legal Disclaimer
 
-    - Default is 64, making it more likely that the target’s TCP stack will see a valid SYN in that first fragment.
+This tool is provided for educational and authorized security testing purposes only. Network scanning without explicit permission is illegal in many jurisdictions and violates most acceptable use policies. Always obtain appropriate authorization before scanning any systems you don't own.
 
-- --frag-two-frags:
-If set, the scan splits the SYN + data into exactly two fragments. One includes at least --frag-first-min-size bytes; the second includes all remaining data.
+## Author Notes
 
-    - This can help if a firewall or target OS is okay with minor fragmentation but discards heavily fragmented packets.
-
-# Legal Disclaimer
-
-This script is for educational purposes only. Network scanning without permission is illegal and unethical. Always obtain explicit consent before testing any system.
+Quantum Scanner was originally created to overcome restrictive firewall and IDS/EDR systems that interrupt legitimate security testing. While the name suggests quantum encryption techniques, the current implementation focuses on conventional evasion methods that have proven effective in various testing scenarios.
