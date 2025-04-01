@@ -1,194 +1,148 @@
-# Quantum Scanner
+# Quantum Scanner (Rust Edition)
 
-A sophisticated port scanner designed to evade firewalls and IDS/EDR systems using specialized scanning techniques.
+An advanced port scanner with evasion capabilities written in Rust.
 
-## Overview
+## Features
 
-Quantum Scanner is an advanced multi-mode port scanner built in Python that offers comprehensive TCP/UDP scanning capabilities, including standard methods (SYN, ACK, FIN, etc.) and specialized evasion techniques like fragmented SYN scanning and protocol mimicry. It leverages Scapy for packet crafting and asyncio for efficient concurrent scanning.
+- **Multiple Scan Techniques**: SYN, ACK, FIN, XMAS, NULL, SSL, UDP, and more
+- **Stealthy Evasion**: Fragmentation, protocol mimicry, TLS echo scans
+- **Enhanced Security**: Memory-only operation, RAM disk support, secure cleanup
+- **Advanced Evasion**: OS fingerprint spoofing, TTL jittering, protocol mimicry
+- **Tor Integration**: Optional traffic routing through Tor (when available)
+- **Performance**: High-speed concurrent scanning leveraging Rust's async capabilities
+- **Service Detection**: Identifies services running on open ports
+- **SSL Analysis**: Examines SSL/TLS certificates and configuration
+- **Cross-Platform**: Works on Linux, macOS, and Windows
 
-## Key Features
+## Security Notice
 
-- **Multiple Scan Types**
-  - **TCP Scans**: SYN, ACK, FIN, XMAS, NULL, WINDOW
-  - **UDP Scan**: Basic open/closed detection without ICMP dependency
-  - **TLS Scans**: SSL probe (certificate analysis) and TLS Echo Mask scan
-  - **Mimic Scan**: Sends protocol-specific banners in SYN packets (HTTP, SSH, FTP, etc.)
-  - **Fragmented SYN**: Splits packets into multiple IP fragments to bypass firewall detection
+This tool is designed for network security professionals conducting authorized security tests. 
+Running port scans against networks or systems without explicit permission is illegal in many jurisdictions and violates most network use policies.
 
-- **Additional Capabilities**
-  - **Banner Grabbing**: Automatically retrieves service banners from open TCP ports
-  - **Service Fingerprinting**: Identifies services based on banners and port information
-  - **Vulnerability Detection**: Basic identification of security issues
-
-- **Evasion Techniques**
-  - **TTL/Hop Limit Randomization**: Varies IPv4 TTL or IPv6 hop limit values
-  - **Customizable Fragmentation**: Control fragment sizes, counts, and timing
-  - **Protocol Mimicry**: Disguises scan packets as legitimate protocol responses
+**You are responsible for using this tool ethically and legally.**
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.7+ (tested with Python 3.10, 3.11)
-- Appropriate permissions for raw socket operations:
-  - Linux: Root access or CAP_NET_RAW capability
-  - macOS/Windows: Administrator privileges
+- Rust 1.67.0 or later
+- Cargo
+- libpcap development files (for packet capture capabilities)
 
-### Dependencies
-
-```bash
-pip install scapy cryptography rich
+On Debian/Ubuntu systems:
 ```
+sudo apt install libpcap-dev
+```
+
+On RHEL/Fedora:
+```
+sudo dnf install libpcap-devel
+```
+
+On macOS with Homebrew:
+```
+brew install libpcap
+```
+
+### Building from source
+
+```
+git clone https://github.com/yourusername/quantum_scanner_rs.git
+cd quantum_scanner_rs
+./build.sh
+```
+
+For additional build options:
+```
+./build.sh --help
+```
+
+To install the binary system-wide (requires root):
+```
+sudo ./build.sh --install
+```
+
+The compiled binary will be in `target/release/quantum_scanner`.
 
 ## Usage
 
-### Basic Command Syntax
-
-```bash
-sudo python3 quantum_scanner.py [OPTIONS] target
+Basic syntax:
+```
+quantum_scanner [OPTIONS] <TARGET>
 ```
 
-### Required Arguments
+Examples:
+```
+# Simple SYN scan of common ports on a single host
+quantum_scanner 192.168.1.1
 
-- `target`: Hostname or IP address (IPv4 or IPv6)
-- `-p/--ports`: Ports to scan, using any of these formats:
-  - Single port: `-p 80`
-  - Port range: `-p 1-100`
-  - Multiple ports: `-p 22,80,443`
+# Comprehensive scan of a host with multiple techniques
+quantum_scanner --scan-types syn,fin,ssl,udp --ports 1-1000 192.168.1.1
 
-### Scan Type Selection
+# Stealthy scan with evasion techniques
+quantum_scanner --evasion 192.168.1.1
 
-Use `-s` or `--scan-types` to select scan methods:
+# Scan with protocol mimicry
+quantum_scanner --scan-types mimic --mimic-protocol HTTP 192.168.1.1
 
-```bash
--s syn ssl udp ack fin xmas null window tls_echo mimic frag
+# Scan an entire subnet
+quantum_scanner --scan-types syn --ports 22,80,443 192.168.1.0/24
+
+# Enable disk mode to write logs to disk (memory-only is default)
+quantum_scanner -d 192.168.1.1
 ```
 
-If no scan type is specified, `syn` is used by default.
+## Command-line Options
 
-### Example Commands
-
-Basic scan with multiple methods:
-```bash
-sudo python3 quantum_scanner.py -p 80,443 -s syn ssl udp --verbose 10.0.0.5
+Basic options:
+```
+<TARGET>                Target IP address, hostname, or CIDR notation for subnet
+-p, --ports             Ports to scan (comma-separated, ranges like 1-1000) [default: 1-1000]
+-s, --scan-types        Scan techniques to use [default: syn]
+                        [possible values: syn, ack, fin, xmas, null, window, ssl, udp, tls_echo, mimic, frag]
+-c, --concurrency       Maximum concurrent operations [default: 100]
+-o, --output            Write results to file
+-j, --json              Output results in JSON format
+-v, --verbose           Enable verbose output
+-d, --disk-mode         Enable disk mode (writes logs and data to disk)
+-h, --help              Print help information
+-V, --version           Print version information
 ```
 
-Full stealth scan with evasion techniques:
-```bash
-sudo python3 quantum_scanner.py -p 22,80,443 -s fin frag mimic --evasions --shuffle-ports 10.0.0.5
+Evasion options:
+```
+-e, --evasion           Enable evasion techniques
+--mimic-protocol        Protocol to mimic in mimic scans [default: HTTP]
+--mimic-os              Operating system to mimic (windows, linux, macos, random)
+--ttl-jitter            TTL jitter amount for enhanced evasion (1-5) [default: 2]
 ```
 
-### Common Options
-
+Performance options:
 ```
--v, --verbose         Print detailed debugging information
--e, --evasions        Enable additional evasion techniques
---ipv6                Use IPv6 for scanning
---json-output         Write results to scan_results.json
---shuffle-ports       Randomize port scanning order for detection avoidance
---log-file FILE       Specify custom log file path (default: scanner.log)
---max-rate N          Limit scanning rate to N packets/second (default: 500)
---concurrency N       Number of concurrent scanning tasks (default: 100)
+-r, --rate              Maximum packets per second (0 for automatic rate) [default: 0]
+-t, --timeout           Scan timeout in seconds [default: 3.0]
 ```
 
-### Timeout Settings
+## Enhanced Security Features
+
+### Memory-Only Operation
+
+By default, Quantum Scanner operates in memory-only mode to avoid leaving sensitive data on disk:
 
 ```
---timeout-scan N      Packet receive timeout in seconds (default: 3.0)
---timeout-connect N   TCP connection timeout in seconds (default: 3.0)
---timeout-banner N    Banner read timeout in seconds (default: 3.0)
+quantum_scanner target.com
 ```
 
-## Advanced Scan Configuration
-
-### Mimic Scan
-
-The mimic scan sends partial protocol banners in TCP SYN packets to disguise the scan:
+To enable disk mode and write logs to disk:
 
 ```
---mimic-protocol PROTOCOL   Protocol to mimic: HTTP, SSH, FTP, SMTP, IMAP, POP3 (default: HTTP)
+quantum_scanner -d target.com
 ```
 
-Example:
-```bash
-sudo python3 quantum_scanner.py 10.0.0.5 -p 22 -s mimic --mimic-protocol SSH
-```
+## License
 
-### Fragmented SYN Scan
+MIT License
 
-This scan splits TCP SYN packets into multiple IP fragments to evade detection:
+## Acknowledgments
 
-```
---frag-min-size N     Minimum fragment size in bytes (default: 16)
---frag-max-size N     Maximum fragment size in bytes (default: 64)
---frag-min-delay N    Minimum delay between fragments in seconds (default: 0.01)
---frag-max-delay N    Maximum delay between fragments in seconds (default: 0.1)
---frag-timeout N      Timeout for fragmented scan response in seconds (default: 10)
---frag-first-min-size N  Minimum size for first fragment in bytes (default: 64)
---frag-two-frags      Use exactly two fragments per packet
-```
-
-Example:
-```bash
-sudo python3 quantum_scanner.py 10.0.0.5 -p 80 -s frag --frag-first-min-size 128 --frag-two-frags
-```
-
-> **Note**: Many modern firewalls detect or drop fragmented SYN packets. Results showing "filtered" may indicate this behavior rather than an actual closed port.
-
-## Scan Results
-
-Results are presented in a formatted table with columns showing:
-
-- Port number
-- TCP state (per scan type)
-- UDP state
-- Firewall filtering status
-- Service identification
-- Version information (from SSL or banners)
-- Potential vulnerabilities
-- OS fingerprinting results
-
-When using `--json-output`, complete results are saved to `scan_results.json`.
-
-## Advanced Scan Techniques Explained
-
-### TLS Echo Mask Scan
-
-This technique attempts to bypass firewalls by disguising TCP SYN packets as TLS handshake responses (Server Hello messages). Since this makes the packets appear as responses to legitimate client handshake requests, it may evade firewalls that:
-
-- Allow TLS traffic on standard ports
-- Don't perform deep packet inspection
-- Lack full TLS state tracking capability
-
-The scanner crafts packets with TLS record type 22 (handshake) and handshake type 2 (Server Hello) to simulate a TLS response.
-
-### Protocol Mimic Scan
-
-This scan sends SYN packets with partial protocol response data that matches the expected protocol for common services:
-
-- Constructs IP/TCP(SYN)/Raw(payload) packets with payloads matching HTTP, SSH, FTP, etc.
-- Analyzes responses: SYN-ACK (open), RST (closed), or no response (filtered)
-
-This can bypass firewalls that allow certain protocols on their standard ports, even for unsolicited traffic.
-
-### Fragmented SYN Scan
-
-This technique attempts to avoid detection by splitting single SYN packets into multiple IP fragments:
-
-- **Randomized Fragment Sizes**: Split payloads into fragments between min_frag_size and max_frag_size
-- **Randomized Delays**: Add timing variations between fragment transmission
-- **Proper Fragmentation**: Set correct fragment offsets and MF flags for proper reassembly
-- **Customizable First Fragment**: Ensure TCP header is fully contained in first fragment
-
-Fragment parameters can be fine-tuned:
-
-- `--frag-first-min-size`: Ensures first fragment includes complete TCP header plus initial data
-- `--frag-two-frags`: Uses exactly two fragments per packet for minimal fragmentation scenarios
-
-## Legal Disclaimer
-
-This tool is provided for educational and authorized security testing purposes only. Network scanning without explicit permission is illegal in many jurisdictions and violates most acceptable use policies. Always obtain appropriate authorization before scanning any systems you don't own.
-
-## Author Notes
-
-Quantum Scanner was originally created to overcome restrictive firewall and IDS/EDR systems that interrupt legitimate security testing. While the name suggests quantum encryption techniques, the current implementation focuses on conventional evasion methods that have proven effective in various testing scenarios.
+This is a Rust port of the original Python Quantum Scanner. 
