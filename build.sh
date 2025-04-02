@@ -307,81 +307,118 @@ install_binary() {
 
 # Create operational security scripts
 create_opsec_scripts() {
-    echo -e "[${GREEN}+${NC}] Creating operational security scripts..."
+    echo -e "[${GREEN}+${NC}] Creating operational security features..."
     
-    # Create run_scanner.sh
-    cat > "run_scanner.sh" << 'EOF'
-#!/bin/bash
+    # Instead of creating scripts, we'll add functions to this build script
+    # Define the run_scanner function that replaces run_scanner.sh
+    echo -e "[${GREEN}+${NC}] OpSec features integrated into build.sh"
+}
 
-# This wrapper adds operational security features to the scanner
-SCANNER="$PWD/target/release/quantum_scanner"
-
-# Ensure DNS requests go through Tor if available
-if command -v tor &> /dev/null && pgrep tor > /dev/null; then
-    export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtsocks.so
-    echo "[+] Routing traffic through Tor when available"
-fi
-
-# Add random timing to evade pattern detection
-if [[ "$*" != *"--rate"* ]]; then
-    RANDOM_RATE=$((100 + RANDOM % 400))
-    ARGS="$@ --rate $RANDOM_RATE"
-    echo "[+] Using randomized packet rate: $RANDOM_RATE pps"
-else
-    ARGS="$@"
-fi
-
-# Always enable evasion techniques
-if [[ "$ARGS" != *"-e"* && "$ARGS" != *"--evasion"* ]]; then
-    ARGS="$ARGS -e"
-    echo "[+] Enabled evasion techniques"
-fi
-
-# Add a secure temporary directory for logs
-TEMP_DIR=$(mktemp -d)
-chmod 700 "$TEMP_DIR"
-LOG_FILE="$TEMP_DIR/scan_log.tmp"
-
-# Run the scanner with enhanced security
-echo "[+] Starting scan with enhanced security features"
-$SCANNER --log-file "$LOG_FILE" $ARGS
-
-# Clean up
-read -p "Press Enter to securely delete logs or Ctrl+C to keep them..."
-shred -u "$LOG_FILE" 2>/dev/null || rm -f "$LOG_FILE"
-rmdir "$TEMP_DIR"
-EOF
-
-    chmod +x "run_scanner.sh"
+# Function to run scanner with enhanced security
+run_scanner() {
+    # Store original arguments
+    ORIGINAL_ARGS="$@"
     
-    # Create clean_traces.sh
-    cat > "clean_traces.sh" << 'EOF'
-#!/bin/bash
+    # Get full path to scanner
+    SCANNER="$PWD/target/release/quantum_scanner"
+    
+    # Ensure DNS requests go through Tor if available
+    if command -v tor &> /dev/null && pgrep tor > /dev/null; then
+        export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtsocks.so
+        echo "[+] Routing traffic through Tor when available"
+    fi
+    
+    # Add random timing to evade pattern detection
+    if [[ "$*" != *"--rate"* ]]; then
+        RANDOM_RATE=$((100 + RANDOM % 400))
+        ARGS="$@ --rate $RANDOM_RATE"
+        echo "[+] Using randomized packet rate: $RANDOM_RATE pps"
+    else
+        ARGS="$@"
+    fi
+    
+    # Always enable evasion techniques
+    if [[ "$ARGS" != *"-e"* && "$ARGS" != *"--evasion"* ]]; then
+        ARGS="$ARGS -e"
+        echo "[+] Enabled evasion techniques"
+    fi
+    
+    # Add a secure temporary directory for logs
+    TEMP_DIR=$(mktemp -d)
+    chmod 700 "$TEMP_DIR"
+    LOG_FILE="$TEMP_DIR/scan_log.tmp"
+    
+    # Run the scanner with enhanced security
+    echo "[+] Starting scan with enhanced security features"
+    $SCANNER --log-file "$LOG_FILE" $ARGS
+    
+    # Clean up
+    read -p "Press Enter to securely delete logs or Ctrl+C to keep them..."
+    shred -u "$LOG_FILE" 2>/dev/null || rm -f "$LOG_FILE"
+    rmdir "$TEMP_DIR"
+}
 
-# Secure removal of logs and other artifacts
-echo "[+] Cleaning scanner artifacts..."
+# Function to clean traces
+clean_traces() {
+    echo "[+] Cleaning scanner artifacts..."
+    
+    # Remove scan logs
+    find . -name "scanner.log" -exec shred -uz {} \; 2>/dev/null || find . -name "scanner.log" -delete
+    
+    # Clean bash history entries related to scanning
+    if [ -f "$HISTFILE" ]; then
+        TEMP_HIST=$(mktemp)
+        grep -v "quantum_scanner\|port.*scan\|nmap" "$HISTFILE" > "$TEMP_HIST" 2>/dev/null
+        cat "$TEMP_HIST" > "$HISTFILE"
+        rm -f "$TEMP_HIST"
+        echo "[+] Cleaned command history"
+    fi
+    
+    # Clear any output files
+    find . -name "scan_results*.txt" -exec shred -uz {} \; 2>/dev/null || find . -name "scan_results*.txt" -delete
+    find . -name "*.json" -exec grep -l "port.*scan" {} \; 2>/dev/null | xargs -r shred -uz 2>/dev/null
+    
+    echo "[+] Cleanup complete"
+}
 
-# Remove scan logs
-find . -name "scanner.log" -exec shred -uz {} \; 2>/dev/null || find . -name "scanner.log" -delete
-
-# Clean bash history entries related to scanning
-if [ -f "$HISTFILE" ]; then
-    TEMP_HIST=$(mktemp)
-    grep -v "quantum_scanner\|port.*scan\|nmap" "$HISTFILE" > "$TEMP_HIST" 2>/dev/null
-    cat "$TEMP_HIST" > "$HISTFILE"
-    rm -f "$TEMP_HIST"
-    echo "[+] Cleaned command history"
-fi
-
-# Clear any output files
-find . -name "scan_results*.txt" -exec shred -uz {} \; 2>/dev/null || find . -name "scan_results*.txt" -delete
-find . -name "*.json" -exec grep -l "port.*scan" {} \; 2>/dev/null | xargs -r shred -uz 2>/dev/null
-
-echo "[+] Cleanup complete"
-EOF
-
-    chmod +x "clean_traces.sh"
-    echo -e "[${GREEN}+${NC}] Created operational security scripts"
+# Function to build static binary
+build_static() {
+    echo -e "${GREEN}Building static Quantum Scanner using Docker...${NC}"
+    
+    # Check if Docker is installed
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}Error: Docker is not installed. Please install Docker first.${NC}"
+        return 1
+    fi
+    
+    # Create output directory
+    mkdir -p bin
+    
+    # Build the Docker image
+    echo -e "${YELLOW}Building Docker image...${NC}"
+    docker build -t quantum-scanner .
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Docker build failed!${NC}"
+        return 1
+    fi
+    
+    # Run the container to copy the binary out
+    echo -e "${YELLOW}Extracting static binary...${NC}"
+    docker run --rm -v "$(pwd)/bin:/out" quantum-scanner cp /quantum_scanner /out/
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to extract binary!${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}Static binary created at${NC} $(pwd)/bin/quantum_scanner"
+    echo -e "${YELLOW}This binary is completely self-contained and can run on any Linux system.${NC}"
+    
+    # Make the binary executable
+    chmod +x bin/quantum_scanner
+    
+    echo -e "${GREEN}Static build completed successfully!${NC}"
 }
 
 # Function to display usage examples
@@ -426,6 +463,8 @@ main() {
     ULTRA_MINIMAL=false
     STATIC=false
     RUN_TESTS=true
+    RUN_SCAN=false
+    CLEAN_TRACES_MODE=false
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -462,6 +501,22 @@ main() {
                 RUN_TESTS=false
                 shift
                 ;;
+            --run)
+                # New flag to run scanner with opSec features
+                RUN_SCAN=true
+                shift
+                break  # Stop processing our options and pass remaining to scanner
+                ;;
+            --clean-traces)
+                # New flag to clean traces
+                CLEAN_TRACES_MODE=true
+                shift
+                ;;
+            --static-build)
+                # New flag to build static binary with Docker
+                build_static
+                exit $?
+                ;;
             --help)
                 echo -e "${YELLOW}Quantum Scanner Build Script${NC}"
                 echo -e "Options:"
@@ -472,7 +527,10 @@ main() {
                 echo -e "  --minimal        Build minimal size binaries with UPX compression"
                 echo -e "  --ultra-minimal  Build extremely small binaries (slower startup)"
                 echo -e "  --static         Build fully static binaries (no external dependencies)"
-                echo -e "  --no-tests       Skip running tests"
+                echo -e "  --no-tests       Skip running tests" 
+                echo -e "  --run [args]     Run the scanner with enhanced security features"
+                echo -e "  --clean-traces   Clean up scanner logs and artifacts"
+                echo -e "  --static-build   Build a fully static binary using Docker"
                 echo -e "  --help           Show this help message"
                 exit 0
                 ;;
@@ -482,6 +540,17 @@ main() {
                 ;;
         esac
     done
+    
+    # Handle the special modes
+    if [ "$RUN_SCAN" = true ]; then
+        run_scanner "$@"
+        exit $?
+    fi
+    
+    if [ "$CLEAN_TRACES_MODE" = true ]; then
+        clean_traces
+        exit $?
+    fi
     
     # Execute appropriate action based on options
     if [ "$FULL_CLEAN" = true ]; then
@@ -512,7 +581,7 @@ main() {
         echo -e "[${YELLOW}!${NC}] Static builds are currently not fully supported due to proc-macro limitations."
         echo -e "[${GREEN}+${NC}] Building with dynamic linking instead for compatibility."
         echo -e "[${YELLOW}!${NC}] To create a portable binary, use the Docker-based static build:"
-        echo -e "[${GREEN}+${NC}]   ./static-build.sh"
+        echo -e "[${GREEN}+${NC}]   ./build.sh --static-build"
         echo -e "[${GREEN}+${NC}] This will create a fully static binary in the bin/ directory."
         
         # Use standard build settings
@@ -565,8 +634,8 @@ main() {
     echo -e "${GREEN}Build completed successfully!${NC}"
     
     # Print additional info
-    echo -e "[${GREEN}+${NC}] To run the scanner with enhanced security: ./run_scanner.sh [options] <target>"
-    echo -e "[${GREEN}+${NC}] To clean up after usage: ./clean_traces.sh"
+    echo -e "[${GREEN}+${NC}] To run the scanner with enhanced security: ./build.sh --run [options] <target>"
+    echo -e "[${GREEN}+${NC}] To clean up after usage: ./build.sh --clean-traces"
 }
 
 # Run the main function with all provided arguments
