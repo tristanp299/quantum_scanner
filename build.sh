@@ -322,32 +322,24 @@ run_scanner() {
     # Get full path to scanner
     SCANNER="$PWD/target/release/quantum_scanner"
     
-    # Setup base arguments with enhanced security by default
-    BASE_ARGS="--enhanced-evasion"
-    
     # Ensure DNS requests go through Tor if available
     if command -v tor &> /dev/null && pgrep tor > /dev/null; then
         export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtsocks.so
         echo "[+] Routing traffic through Tor when available"
-        
-        # Only add --use-tor if not already specified
-        if [[ "$*" != *"--use-tor"* && "$*" != *"--no-tor"* ]]; then
-            BASE_ARGS="$BASE_ARGS --use-tor"
-        fi
-    else
-        echo "[!] Tor not available. For better OpSec, consider installing Tor."
     fi
     
     # Add random timing to evade pattern detection
     if [[ "$*" != *"--rate"* ]]; then
         RANDOM_RATE=$((100 + RANDOM % 400))
+        ARGS="$@ --rate $RANDOM_RATE"
         echo "[+] Using randomized packet rate: $RANDOM_RATE pps"
-        BASE_ARGS="$BASE_ARGS --rate $RANDOM_RATE"
+    else
+        ARGS="$@"
     fi
     
     # Always enable evasion techniques
-    if [[ "$*" != *"-e"* && "$*" != *"--evasion"* ]]; then
-        BASE_ARGS="$BASE_ARGS -e"
+    if [[ "$ARGS" != *"-e"* && "$ARGS" != *"--evasion"* ]]; then
+        ARGS="$ARGS -e"
         echo "[+] Enabled evasion techniques"
     fi
     
@@ -356,13 +348,9 @@ run_scanner() {
     chmod 700 "$TEMP_DIR"
     LOG_FILE="$TEMP_DIR/scan_log.tmp"
     
-    # Combine base args with user args
-    FULL_ARGS="$BASE_ARGS $ORIGINAL_ARGS --log-file $LOG_FILE"
-    
     # Run the scanner with enhanced security
     echo "[+] Starting scan with enhanced security features"
-    echo "[+] Enhanced evasion enabled: Mimics legitimate traffic, randomizes TTL values, adds decoy packets"
-    $SCANNER $FULL_ARGS
+    $SCANNER --log-file "$LOG_FILE" $ARGS
     
     # Clean up
     read -p "Press Enter to securely delete logs or Ctrl+C to keep them..."
