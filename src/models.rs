@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::IpAddr;
-use std::ops::RangeInclusive;
 use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
@@ -94,8 +93,8 @@ impl FromStr for PortStatus {
 pub struct CertificateInfo {
     pub subject: String,
     pub issuer: String,
-    pub not_before: DateTime<Utc>,
-    pub not_after: DateTime<Utc>,
+    pub not_before: String,
+    pub not_after: String,
     pub serial_number: String,
     pub signature_algorithm: String,
     pub version: u8,

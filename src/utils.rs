@@ -1,11 +1,9 @@
-use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, Instant};
 use std::env;
-use std::sync::{Arc, Mutex};
 use chrono::{Utc};
 
-use log::{debug, warn, info};
+use log::{debug, warn};
 use pnet::datalink;
 use rand::{Rng, thread_rng, distributions::{Distribution, Uniform}};
 use rand::seq::SliceRandom;

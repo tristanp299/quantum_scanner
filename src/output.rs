@@ -1,14 +1,13 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
 use console::{style, Term};
 use serde_json;
 
-use crate::models::{PortResult, PortStatus, ScanResults, ScanType};
+use crate::models::{PortResult, PortStatus, ScanResults};
 use crate::utils::sanitize_string;
 
 /// Save scan results to a JSON file
@@ -234,8 +233,8 @@ fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<(
         writeln!(file, "- Subject: {}", cert.subject)?;
         writeln!(file, "- Issuer: {}", cert.issuer)?;
         writeln!(file, "- Valid: {} to {}", 
-            cert.not_before.format("%Y-%m-%d"),
-            cert.not_after.format("%Y-%m-%d")
+            cert.not_before,
+            cert.not_after
         )?;
         writeln!(file, "- Algorithm: {}", cert.signature_algorithm)?;
         if let Some(bits) = cert.public_key_bits {
@@ -353,16 +352,26 @@ fn print_detailed_results(results: &ScanResults) -> Result<()> {
                     println!("    Subject: {}", cert.subject);
                     println!("    Issuer: {}", cert.issuer);
                     println!("    Valid: {} to {}", 
-                        cert.not_before.format("%Y-%m-%d"),
-                        cert.not_after.format("%Y-%m-%d")
+                        cert.not_before,
+                        cert.not_after
                     );
                     
                     // Check if cert is expired
                     let now = Utc::now();
-                    if now < cert.not_before {
-                        println!("    {}", style("Certificate not yet valid!").red().bold());
-                    } else if now > cert.not_after {
-                        println!("    {}", style("Certificate expired!").red().bold());
+                    // Parse datetime strings for comparison
+                    let not_before = chrono::DateTime::parse_from_rfc3339(&cert.not_before).ok();
+                    let not_after = chrono::DateTime::parse_from_rfc3339(&cert.not_after).ok();
+                    
+                    if let Some(not_before_time) = not_before {
+                        if now < not_before_time {
+                            println!("    {}", style("Certificate not yet valid!").red().bold());
+                        }
+                    }
+                    
+                    if let Some(not_after_time) = not_after {
+                        if now > not_after_time {
+                            println!("    {}", style("Certificate expired!").red().bold());
+                        }
                     }
                 }
                 

@@ -157,11 +157,20 @@ build_project() {
     
     if [ "$BUILD_TYPE" == "release" ]; then
         # Release build with optimizations
-        cargo build --release
+        cargo build --release $EXTRA_BUILD_ARGS
         
         if [ $? -eq 0 ]; then
             echo -e "[${GREEN}+${NC}] Release build completed successfully"
-            echo -e "[${GREEN}+${NC}] Binary location: ${PWD}/target/release/quantum_scanner"
+            # Use the correct path based on build target
+            if [ "$STATIC" = true ]; then
+                echo -e "[${GREEN}+${NC}] Binary location: ${PWD}/$BUILD_TARGET_DIR/quantum_scanner"
+                # Make sure output directory exists
+                mkdir -p "$OUTPUT_DIR"
+                # Copy to standard location
+                cp "$BUILD_TARGET_DIR/quantum_scanner" "$OUTPUT_DIR/"
+            else
+                echo -e "[${GREEN}+${NC}] Binary location: ${PWD}/target/release/quantum_scanner"
+            fi
         else
             echo -e "[${RED}!${NC}] Release build failed"
             exit 1
@@ -215,8 +224,10 @@ run_tests() {
 
 # Function to apply binary hardening techniques
 apply_binary_hardening() {
-    BINARY_PATH=""
-    if [ "$BUILD_TYPE" = "release" ]; then
+    # Use the correct binary path based on build type and static flag
+    if [ "$STATIC" = true ]; then
+        BINARY_PATH="$BUILD_TARGET_DIR/quantum_scanner"
+    elif [ "$BUILD_TYPE" = "release" ]; then
         BINARY_PATH="./target/release/quantum_scanner"
     else
         BINARY_PATH="./target/debug/quantum_scanner"
@@ -495,12 +506,32 @@ main() {
     
     # Set build flags based on options
     if [ "$STATIC" = true ]; then
-        echo -e "[${BLUE}*${NC}] Building with static linking for maximum portability..."
-        # Set environment variables for static linking
-        export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes -C prefer-dynamic=no"
+        echo -e "[${BLUE}*${NC}] Static builds requested..."
+        
+        # Display warning about static build limitations
+        echo -e "[${YELLOW}!${NC}] Static builds are currently not fully supported due to proc-macro limitations."
+        echo -e "[${GREEN}+${NC}] Building with dynamic linking instead for compatibility."
+        echo -e "[${YELLOW}!${NC}] To create a portable binary, use the Docker-based static build:"
+        echo -e "[${GREEN}+${NC}]   ./static-build.sh"
+        echo -e "[${GREEN}+${NC}] This will create a fully static binary in the bin/ directory."
+        
+        # Use standard build settings
+        export RUSTFLAGS="-C opt-level=3 -C target-cpu=native"
+        EXTRA_BUILD_ARGS=""
+        BUILD_TARGET_DIR="./target/release"
+        
+        # Ask for confirmation
+        read -p "Continue with standard build? (y/n): " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo -e "[${RED}!${NC}] Build aborted"
+            exit 1
+        fi
     else
         # Standard optimization flags
-        export RUSTFLAGS="-C opt-level=3 -C target-cpu=native -C lto=thin"
+        export RUSTFLAGS="-C opt-level=3 -C target-cpu=native"
+        EXTRA_BUILD_ARGS=""
+        BUILD_TARGET_DIR="./target/release"
     fi
     
     # Build the project

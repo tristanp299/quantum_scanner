@@ -4,18 +4,20 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use rand::{thread_rng, Rng};
-use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, ServerName, OwnedTrustAnchor};
 use sha2::{Sha256, Digest};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UdpSocket, TcpSocket};
 use tokio::time::sleep;
 use tokio::time::timeout;
 use webpki_roots::TLS_SERVER_ROOTS;
+
+// Conditionally import x509-parser
+#[cfg(not(feature = "minimal-static"))]
 use x509_parser::prelude::*;
+#[cfg(not(feature = "minimal-static"))]
 use x509_parser::public_key::PublicKey;
 
 use crate::models::{CertificateInfo, PortStatus};
-use crate::utils;
 use crate::utils::sanitize_string;
 
 /// SYN scan implementation
@@ -74,8 +76,8 @@ pub async fn ssl_scan(
 ) -> Result<(PortStatus, Option<CertificateInfo>, String)> {
     // Create SSL configuration with system root certificates
     let mut root_store = RootCertStore::empty();
-    root_store.add_trust_anchors(TLS_SERVER_ROOTS.0.iter().map(|ta| {
-        rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
+    root_store.add_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
+        OwnedTrustAnchor::from_subject_spki_name_constraints(
             ta.subject,
             ta.spki,
             ta.name_constraints,
@@ -111,13 +113,16 @@ pub async fn ssl_scan(
     // Perform handshake
     let _tls_stream = rustls::Stream::new(&mut conn, &mut std_socket);
     
-    // Try to read certificate
+    #[cfg(not(feature = "minimal-static"))]
     let cert_info = if conn.peer_certificates().is_some() && !conn.peer_certificates().unwrap().is_empty() {
         let cert_der = &conn.peer_certificates().unwrap()[0].0;
         parse_certificate(cert_der)
     } else {
         None
     };
+    
+    #[cfg(feature = "minimal-static")]
+    let cert_info = None;
     
     // Get protocol version
     let version = match conn.protocol_version() {
@@ -133,6 +138,7 @@ pub async fn ssl_scan(
 }
 
 /// Parse an X.509 certificate and extract information
+#[cfg(not(feature = "minimal-static"))]
 fn parse_certificate(cert_der: &[u8]) -> Option<CertificateInfo> {
     match x509_parser::parse_x509_certificate(cert_der) {
         Ok((_, cert)) => {
@@ -140,22 +146,17 @@ fn parse_certificate(cert_der: &[u8]) -> Option<CertificateInfo> {
             let subject = cert.subject().to_string();
             let issuer = cert.issuer().to_string();
             
-            // Use the newer recommended approach for datetime conversion
-            let not_before = {
-                // Handle the case where timestamp might be invalid
-                let timestamp = cert.validity().not_before.timestamp();
-                let naive = chrono::NaiveDateTime::from_timestamp_opt(timestamp, 0)
-                    .unwrap_or_else(|| chrono::NaiveDateTime::UNIX_EPOCH);
-                chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc)
-            };
+            // Get not_before date
+            let timestamp = cert.validity().not_before.timestamp();
+            let naive = chrono::DateTime::from_timestamp(timestamp, 0)
+                .unwrap_or_else(|| chrono::DateTime::default());
+            let not_before = naive.to_string();
             
-            let not_after = {
-                // Handle the case where timestamp might be invalid
-                let timestamp = cert.validity().not_after.timestamp();
-                let naive = chrono::NaiveDateTime::from_timestamp_opt(timestamp, 0)
-                    .unwrap_or_else(|| chrono::NaiveDateTime::UNIX_EPOCH);
-                chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc)
-            };
+            // Get not_after date
+            let timestamp = cert.validity().not_after.timestamp();
+            let naive = chrono::DateTime::from_timestamp(timestamp, 0)
+                .unwrap_or_else(|| chrono::DateTime::default());
+            let not_after = naive.to_string();
             
             let serial_number = cert.serial.to_string();
             let signature_algorithm = cert.signature_algorithm.algorithm.to_string();
@@ -496,7 +497,7 @@ pub async fn mimic_scan_with_payload(
     _local_ip: Option<IpAddr>,
     _use_ipv6: bool,
     _evasion: bool,
-    protocol: &str,
+    _protocol: &str,
     payload: Vec<u8>,
     timeout_duration: Duration,
 ) -> Result<PortStatus> {

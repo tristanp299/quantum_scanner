@@ -5,6 +5,11 @@ edition = "2021"
 authors = ["Your Name"]
 description = "Advanced port scanner with evasion capabilities"
 
+# Remove any profile settings that might be causing conflicts
+# [profile.release]
+# lto = true
+# embed-bitcode = false
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.28", features = ["full", "time"] }
@@ -19,7 +24,7 @@ socket2 = "0.5.3"
 # TLS/SSL support
 rustls = "0.21.0"
 rustls-pemfile = "1.0.2"
-webpki-roots = "0.23.0"
+webpki-roots = "0.25.2"
 x509-parser = "0.15.0"
 
 # Cryptography
@@ -56,7 +61,7 @@ serde_json = "1.0.96"
 futures = "0.3.28"
 async-trait = "0.1.68"
 
-# Networking extras
-trust-dns-resolver = "0.22.0"
+# Networking extras - replaced trust-dns with hickory-dns
+hickory-resolver = { version = "0.24.0", features = ["dns-over-rustls"] }
 ipnet = "2.7.2"
 cidr-utils = "0.5.10"

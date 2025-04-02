@@ -1,18 +1,18 @@
+use anyhow::{Context, Result};
+use chrono::Utc;
+use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr};
+use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use anyhow::{Context, Result};
-use chrono::Utc;
-use futures::future::join_all;
-use log::{debug, error, info, warn};
-use parking_lot::Mutex;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::time::sleep;
-use trust_dns_resolver::config::{ResolverConfig, ResolverOpts};
-use trust_dns_resolver::TokioAsyncResolver;
+use parking_lot::Mutex;
+
+// Replace trust-dns imports with hickory-dns
+use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::TokioAsyncResolver;
 
 use crate::models::{PortResult, PortStatus, ScanResults, ScanType};
 use crate::utils;
@@ -218,22 +218,20 @@ impl QuantumScanner {
         }
         
         // Otherwise, resolve the hostname
-        let resolver = TokioAsyncResolver::tokio(
-            ResolverConfig::default(),
-            ResolverOpts::default(),
-        )?;
+        let resolver = TokioAsyncResolver::tokio_from_system_conf()
+            .context("Failed to create DNS resolver")?;
         
         // Choose IPv6 or IPv4 lookup based on configuration
         if use_ipv6 {
             let response = resolver.ipv6_lookup(target).await?;
-            let ip = response.iter().next()
+            let record = response.iter().next()
                 .context("No IPv6 addresses found for host")?;
-            Ok(IpAddr::V6(*ip))
+            Ok(IpAddr::V6(record.0))
         } else {
             let response = resolver.ipv4_lookup(target).await?;
-            let ip = response.iter().next()
+            let record = response.iter().next()
                 .context("No IPv4 addresses found for host")?;
-            Ok(IpAddr::V4(*ip))
+            Ok(IpAddr::V4(record.0))
         }
     }
     
@@ -384,7 +382,7 @@ impl QuantumScanner {
                     ).await;
                     
                     // Get TTL value based on evasion settings
-                    let ttl = if enhanced_evasion {
+                    let _ttl = if enhanced_evasion {
                         utils::get_advanced_ttl(&mimic_os, ttl_jitter)
                     } else if evasions {
                         utils::get_ttl(true, Some(&mimic_os))
@@ -780,8 +778,11 @@ impl QuantumScanner {
             if let Some(cert_info) = &result.cert_info {
                 // Example: Check for expired certificates
                 let now = Utc::now();
-                if now > cert_info.not_after {
-                    result.vulns.push("SSL Certificate expired".to_string());
+                // Parse not_after string to DateTime for comparison
+                if let Ok(not_after) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after) {
+                    if now > not_after {
+                        result.vulns.push("SSL Certificate expired".to_string());
+                    }
                 }
                 
                 // Example: Check for old SSL/TLS versions

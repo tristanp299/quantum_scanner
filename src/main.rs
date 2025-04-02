@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
 use rand::{thread_rng, Rng};
-use std::env;
 use std::sync::Arc;
 
 mod scanner;
@@ -118,7 +117,7 @@ struct Args {
     
     /// Password for log encryption
     #[clap(long)]
-    log_password: Option<String>,
+    _log_password: Option<String>,
     
     /// Enable enhanced evasion techniques
     #[clap(long, default_value_t = true)]
@@ -173,7 +172,7 @@ struct Args {
     delete_passes: u8,
 
     /// Scan the top 100 common ports
-    #[clap(short = 't', long)]
+    #[clap(short = 'T', long)]
     top_100: bool,
 }
 
@@ -243,7 +242,7 @@ impl Colors {
 }
 
 /// Initialize logging with proper configuration
-fn setup_logging(log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_logs: bool, log_password: Option<&str>) -> Result<Option<utils::MemoryLogBuffer>, anyhow::Error> {
+fn setup_logging(log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_logs: bool, _log_password: Option<&str>) -> Result<Option<utils::MemoryLogBuffer>, anyhow::Error> {
     // Setup memory logger if memory-only mode is enabled
     if memory_only {
         // When in memory-only mode, do not create any log files on disk
@@ -602,7 +601,7 @@ async fn main() -> Result<(), anyhow::Error> {
         args.verbose, 
         args.memory_only,
         args.encrypt_logs,
-        args.log_password.as_deref()
+        args._log_password.as_deref()
     ) {
         Ok(logger) => logger,
         Err(e) => {
@@ -716,7 +715,7 @@ async fn main() -> Result<(), anyhow::Error> {
     // Display results
     for port in results.open_ports.iter().cloned().collect::<Vec<_>>() {
         if let Some(result) = results.results.get(&port) {
-            let status = result.tcp_states.values().next().unwrap_or(&PortStatus::Filtered);
+            let _status = result.tcp_states.values().next().unwrap_or(&PortStatus::Filtered);
             println!("Port {}:{} {}", port, colors.green, colors.reset);
             
             if let Some(service) = &result.service {
