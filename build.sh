@@ -322,24 +322,32 @@ run_scanner() {
     # Get full path to scanner
     SCANNER="$PWD/target/release/quantum_scanner"
     
+    # Setup base arguments with enhanced security by default
+    BASE_ARGS="--enhanced-evasion"
+    
     # Ensure DNS requests go through Tor if available
     if command -v tor &> /dev/null && pgrep tor > /dev/null; then
         export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtsocks.so
         echo "[+] Routing traffic through Tor when available"
+        
+        # Only add --use-tor if not already specified
+        if [[ "$*" != *"--use-tor"* && "$*" != *"--no-tor"* ]]; then
+            BASE_ARGS="$BASE_ARGS --use-tor"
+        fi
+    else
+        echo "[!] Tor not available. For better OpSec, consider installing Tor."
     fi
     
     # Add random timing to evade pattern detection
     if [[ "$*" != *"--rate"* ]]; then
         RANDOM_RATE=$((100 + RANDOM % 400))
-        ARGS="$@ --rate $RANDOM_RATE"
         echo "[+] Using randomized packet rate: $RANDOM_RATE pps"
-    else
-        ARGS="$@"
+        BASE_ARGS="$BASE_ARGS --rate $RANDOM_RATE"
     fi
     
     # Always enable evasion techniques
-    if [[ "$ARGS" != *"-e"* && "$ARGS" != *"--evasion"* ]]; then
-        ARGS="$ARGS -e"
+    if [[ "$*" != *"-e"* && "$*" != *"--evasion"* ]]; then
+        BASE_ARGS="$BASE_ARGS -e"
         echo "[+] Enabled evasion techniques"
     fi
     
@@ -348,9 +356,13 @@ run_scanner() {
     chmod 700 "$TEMP_DIR"
     LOG_FILE="$TEMP_DIR/scan_log.tmp"
     
+    # Combine base args with user args
+    FULL_ARGS="$BASE_ARGS $ORIGINAL_ARGS --log-file $LOG_FILE"
+    
     # Run the scanner with enhanced security
     echo "[+] Starting scan with enhanced security features"
-    $SCANNER --log-file "$LOG_FILE" $ARGS
+    echo "[+] Enhanced evasion enabled: Mimics legitimate traffic, randomizes TTL values, adds decoy packets"
+    $SCANNER $FULL_ARGS
     
     # Clean up
     read -p "Press Enter to securely delete logs or Ctrl+C to keep them..."
@@ -405,12 +417,25 @@ build_static() {
     
     # Run the container to copy the binary out
     echo -e "${YELLOW}Extracting static binary...${NC}"
-    docker run --rm -v "$(pwd)/bin:/out" quantum-scanner cp /quantum_scanner /out/
+    # Create a temporary container to extract the binary from the image
+    CONTAINER_ID=$(docker create quantum-scanner)
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}Failed to create temporary container!${NC}"
+        return 1
+    fi
+    
+    # Copy the binary from the container
+    docker cp $CONTAINER_ID:/quantum_scanner ./bin/quantum_scanner
     
     if [ $? -ne 0 ]; then
         echo -e "${RED}Failed to extract binary!${NC}"
+        docker rm $CONTAINER_ID > /dev/null
         return 1
     fi
+    
+    # Remove the temporary container
+    docker rm $CONTAINER_ID > /dev/null
     
     echo -e "${GREEN}Static binary created at${NC} $(pwd)/bin/quantum_scanner"
     echo -e "${YELLOW}This binary is completely self-contained and can run on any Linux system.${NC}"
