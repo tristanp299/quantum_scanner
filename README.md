@@ -65,9 +65,9 @@ To install the binary system-wide (requires root):
 sudo ./build.sh --install
 ```
 
-To build a fully static binary using Docker:
+To build a fully static binary:
 ```
-sudo ./build.sh --static-build
+sudo ./build.sh --static
 ```
 
 The compiled binary will be in `target/release/quantum_scanner` and also copied to `./quantum_scanner`.

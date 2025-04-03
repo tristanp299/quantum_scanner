@@ -29,16 +29,30 @@ WORKDIR /build
 # Create .cargo directory for configuration
 RUN mkdir -p /build/.cargo
 
+# Create cargo config file to disable SSL verification
+RUN echo '# Cargo config for Docker builds\n\
+[http]\n\
+check-revoke = false\n\
+\n\
+[net]\n\
+retry = 10\n\
+git-fetch-with-cli = true\n\
+\n\
+[source.crates-io]\n\
+protocol = "sparse"\n\
+ssl-verify = false' > /build/.cargo/config.toml
+
 # Copy source code
 COPY . .
 
 # Set environment variables to disable SSL verification
 # This is needed for environments with self-signed certificates
 ENV CARGO_HTTP_CHECK_REVOKE=false \
-    CARGO_HTTP_SSL_VERSION_CHECK=false \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
-    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
-    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+    CARGO_HTTP_DEBUG=true \
+    CARGO_NET_RETRY=10 \
+    CARGO_TERM_VERBOSE=true \
+    CARGO_TERM_COLOR=always
 
 # Build statically linked executable using musl
 RUN rustup target add x86_64-unknown-linux-musl

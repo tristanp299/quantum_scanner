@@ -342,7 +342,7 @@ impl QuantumScanner {
         
         // Log scan start with enhanced operational security
         let scan_info = format!("Starting scan of {} with {} scan types and {} ports",
-            if self.enhanced_evasion { "[REDACTED]" } else { &self.target }, // Redact IP when enhanced evasion is on
+            &self.target, // Always show the actual target IP, no redaction
             self.scan_types.len(),
             self.ports.len()
         );

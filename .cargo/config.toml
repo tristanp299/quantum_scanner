@@ -1,30 +1,14 @@
 # ======================================================================
-# Cargo Configuration
-# ======================================================================
-# This configuration bypasses SSL certificate validation for registry.
-# IMPORTANT: This is a security risk but sometimes necessary in managed
-# VM environments with custom certificate authorities or proxies.
+# Cargo Configuration for SSL Certificate Issues
 # ======================================================================
 
-[http]
-# Disable SSL certificate verification for registry connections
-# This will allow connections to servers with self-signed certificates
-check-revoke = false
-
+# Network settings - use git CLI for fetching
 [net]
-# Set longer timeout for slower network connections
-retry = 3
 git-fetch-with-cli = true
+retry = 10
 
-# Disable SSL certificate verification for registry.crates.io and other registries
-[registries]
-crates-io = { protocol = "sparse", ssl-verify = false }
-
-# Set HTTP/HTTPS properties
-[http.ssl]
-verify-peer = false  # Disable certificate verification
-cainfo = ""          # Don't use a specific CA bundle
-
-# Security note: This configuration reduces security but allows builds in
-# environments with self-signed certificates or certificate chains.
-# Only use this in trusted environments where the reduced security is acceptable. 
+# Disable SSL verification for the crates.io registry
+[source.crates-io]
+registry = "https://github.com/rust-lang/crates.io-index"
+protocol = "sparse"
+ssl-verify = false

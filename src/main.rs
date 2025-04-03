@@ -203,25 +203,9 @@ struct Args {
     #[clap(short = 'T', long)]
     top_100: bool,
 
-    /// Fix redacted IPs in logs by replacing [REDACTED] with the target IP
+    /// Path to a log file to unredact (without running a scan)
     /// 
-    /// This option automatically replaces all occurrences of [REDACTED] in the log file
-    /// with the actual target IP address after the scan completes. This is enabled by default
-    /// and can be disabled with --no-fix-redaction if you want to preserve redacted IPs in logs.
-    #[clap(long, default_value_t = true)]
-    fix_redaction: bool,
-    
-    /// Disable automatic fixing of redacted IPs in logs
-    /// 
-    /// When specified, this preserves [REDACTED] placeholders in log files instead of
-    /// replacing them with the actual target IP address after scanning. This option
-    /// overrides the default behavior which automatically fixes redacted IPs.
-    #[clap(long)]
-    no_fix_redaction: bool,
-    
-    /// Path to a log file to fix redaction in (without running a scan)
-    /// 
-    /// When provided without running a scan, this will only perform the redaction fix
+    /// When provided without running a scan, this will only perform the redaction removal
     /// operation on the specified log file, replacing [REDACTED] with the target IP.
     #[clap(long)]
     fix_log_file: Option<PathBuf>,
@@ -388,7 +372,7 @@ fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_
                 record.level(),
                 record.file().unwrap_or("unknown"),
                 record.line().unwrap_or(0),
-                record.args() // Use raw message with no redaction
+                record.args() // Always display IPs in logs, never redact
             )
         });
         
@@ -397,7 +381,7 @@ fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_
         builder.init();
     } else {
         // Standard logging to file only for non-verbose mode
-        // Use raw message format with no redaction
+        // Always display IPs, never redact them
         env_logger::Builder::from_default_env()
             .format_timestamp_secs()
             .format_module_path(true)
@@ -623,7 +607,7 @@ fn secure_delete_file(path: &PathBuf, passes: u8) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Fix a log file by replacing [REDACTED] with the actual IP address
+/// Unredact a log file by replacing [REDACTED] with the actual IP address
 fn fix_redacted_log(log_file: &PathBuf, ip_address: &str) -> Result<usize, anyhow::Error> {
     // Check if the log file exists
     if !log_file.exists() {
@@ -646,7 +630,7 @@ fn fix_redacted_log(log_file: &PathBuf, ip_address: &str) -> Result<usize, anyho
     let backup_path = format!("{}.bak", log_file.display());
     fs::copy(log_file, &backup_path)?;
     
-    // Replace [REDACTED] with the IP address
+    // Replace [REDACTED] with the IP address to permanently unredact the log
     let updated_content = content.replace("[REDACTED]", ip_address);
     
     // Write the updated content back to the file
@@ -697,24 +681,29 @@ fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>, anyhow::Error
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    // Process help flag specially
+    // This is needed because clap doesn't automatically exit after showing help
+    // We want to avoid running the scanner when just viewing help
+    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
+        // Parse arguments to trigger help display
+        let _ = Args::parse();
+        // Explicitly exit after help is displayed
+        std::process::exit(0);
+    }
+    
     // Parse command-line arguments
     let mut args = Args::parse();
-    
-    // If no_fix_redaction is specified, override the fix_redaction default
-    if args.no_fix_redaction {
-        args.fix_redaction = false;
-    }
     
     // Check if we're only fixing a log file without scanning
     if let Some(log_file) = &args.fix_log_file {
         match fix_redacted_log(log_file, &args.target) {
             Ok(count) => {
-                println!("Fixed {} occurrences of [REDACTED] in {}", count, log_file.display());
+                println!("Unredacted {} occurrences of [REDACTED] in {}", count, log_file.display());
                 println!("A backup was created at {}.bak", log_file.display());
                 return Ok(());
             },
             Err(e) => {
-                eprintln!("Error fixing log file: {}", e);
+                eprintln!("Error unredacting log file: {}", e);
                 return Err(e);
             }
         }
@@ -1011,27 +1000,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 Ok(_) => println!("[{}+{}] RAM disk cleaned up successfully", colors.green, colors.reset),
                 Err(e) => println!("[{}!{}] Failed to clean up RAM disk: {}", 
                     colors.yellow, colors.reset, e),
-            }
-        }
-    }
-    
-    // If fix_redaction is enabled, process the log file
-    if args.fix_redaction && !args.memory_only {
-        let log_file = PathBuf::from("scanner.log");
-        if log_file.exists() {
-            match fix_redacted_log(&log_file, &args.target) {
-                Ok(count) => {
-                    if count > 0 {
-                        println!("[{}+{}] Fixed {} occurrences of [REDACTED] in logs", 
-                            colors.green, colors.reset, count);
-                        println!("[{}+{}] A backup was created at {}.bak", 
-                            colors.green, colors.reset, log_file.display());
-                    }
-                },
-                Err(e) => {
-                    println!("[{}!{}] Error fixing log redaction: {}", 
-                        colors.yellow, colors.reset, e);
-                }
             }
         }
     }
