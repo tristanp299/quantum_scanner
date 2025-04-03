@@ -5,6 +5,8 @@ use std::process;
 use std::time::Duration;
 use rand::{thread_rng, Rng};
 use std::sync::Arc;
+use std::fs;
+use std::io::{Read, Write};
 
 mod scanner;
 mod models;
@@ -34,9 +36,10 @@ struct Args {
     memory_only: bool,
 
     /// Scan techniques to use (comma-separated)
-    /// Examples: -s syn,ssl or -s syn -s ssl
-    #[clap(short, long, value_enum, use_value_delimiter = true, value_delimiter = ',', default_value = "syn", num_args = 1..)]
-    scan_types: Vec<ScanTypeArg>,
+    /// Examples: -s syn,ssl,udp or -s syn -s ssl
+    /// Important: Do not include spaces after commas (use 'syn,ssl,udp' NOT 'syn, ssl, udp')
+    #[clap(short, long, default_value = "syn")]
+    scan_types_str: String,
 
     /// Maximum concurrent operations
     #[clap(short, long, default_value_t = 100)]
@@ -199,6 +202,29 @@ struct Args {
     /// Scan the top 100 common ports
     #[clap(short = 'T', long)]
     top_100: bool,
+
+    /// Fix redacted IPs in logs by replacing [REDACTED] with the target IP
+    /// 
+    /// This option automatically replaces all occurrences of [REDACTED] in the log file
+    /// with the actual target IP address after the scan completes. This is enabled by default
+    /// and can be disabled with --no-fix-redaction if you want to preserve redacted IPs in logs.
+    #[clap(long, default_value_t = true)]
+    fix_redaction: bool,
+    
+    /// Disable automatic fixing of redacted IPs in logs
+    /// 
+    /// When specified, this preserves [REDACTED] placeholders in log files instead of
+    /// replacing them with the actual target IP address after scanning. This option
+    /// overrides the default behavior which automatically fixes redacted IPs.
+    #[clap(long)]
+    no_fix_redaction: bool,
+    
+    /// Path to a log file to fix redaction in (without running a scan)
+    /// 
+    /// When provided without running a scan, this will only perform the redaction fix
+    /// operation on the specified log file, replacing [REDACTED] with the target IP.
+    #[clap(long)]
+    fix_log_file: Option<PathBuf>,
 }
 
 /// Enum for scan types from CLI
@@ -353,7 +379,7 @@ fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_
                 println!("[{}] {}", record.level(), record.args());
             }
             
-            // Format for file
+            // Format for file - ensure no IP redaction occurs by passing the raw message
             use std::io::Write;
             writeln!(
                 buf,
@@ -362,7 +388,7 @@ fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_
                 record.level(),
                 record.file().unwrap_or("unknown"),
                 record.line().unwrap_or(0),
-                record.args()
+                record.args() // Use raw message with no redaction
             )
         });
         
@@ -371,6 +397,7 @@ fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_
         builder.init();
     } else {
         // Standard logging to file only for non-verbose mode
+        // Use raw message format with no redaction
         env_logger::Builder::from_default_env()
             .format_timestamp_secs()
             .format_module_path(true)
@@ -596,10 +623,102 @@ fn secure_delete_file(path: &PathBuf, passes: u8) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Fix a log file by replacing [REDACTED] with the actual IP address
+fn fix_redacted_log(log_file: &PathBuf, ip_address: &str) -> Result<usize, anyhow::Error> {
+    // Check if the log file exists
+    if !log_file.exists() {
+        return Err(anyhow::anyhow!("Log file not found: {}", log_file.display()));
+    }
+    
+    // Read the file content
+    let mut content = String::new();
+    let mut file = fs::File::open(log_file)?;
+    file.read_to_string(&mut content)?;
+    
+    // Count occurrences before replacement
+    let redacted_count = content.matches("[REDACTED]").count();
+    
+    if redacted_count == 0 {
+        return Ok(0); // No replacements needed
+    }
+    
+    // Create a backup of the original file
+    let backup_path = format!("{}.bak", log_file.display());
+    fs::copy(log_file, &backup_path)?;
+    
+    // Replace [REDACTED] with the IP address
+    let updated_content = content.replace("[REDACTED]", ip_address);
+    
+    // Write the updated content back to the file
+    let mut file = fs::File::create(log_file)?;
+    file.write_all(updated_content.as_bytes())?;
+    
+    Ok(redacted_count)
+}
+
+/// Parse scan types from a string 
+fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>, anyhow::Error> {
+    let mut scan_types = Vec::new();
+    
+    // Split by comma and trim whitespace
+    for scan_type_str in scan_types_str.split(',') {
+        let trimmed = scan_type_str.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        
+        // Convert string to ScanTypeArg
+        let scan_type_arg = match trimmed.to_lowercase().as_str() {
+            "syn" => ScanTypeArg::Syn,
+            "ssl" => ScanTypeArg::Ssl,
+            "udp" => ScanTypeArg::Udp,
+            "ack" => ScanTypeArg::Ack,
+            "fin" => ScanTypeArg::Fin,
+            "xmas" => ScanTypeArg::Xmas,
+            "null" => ScanTypeArg::Null,
+            "window" => ScanTypeArg::Window,
+            "tls-echo" | "tlsecho" => ScanTypeArg::TlsEcho,
+            "mimic" => ScanTypeArg::Mimic,
+            "frag" => ScanTypeArg::Frag,
+            _ => return Err(anyhow::anyhow!("Invalid scan type: '{}'. Valid types are: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag", trimmed)),
+        };
+        
+        // Convert to ScanType and add to list
+        scan_types.push(ScanType::from(scan_type_arg));
+    }
+    
+    if scan_types.is_empty() {
+        // Default to SYN scan if nothing valid was provided
+        scan_types.push(ScanType::Syn);
+    }
+    
+    Ok(scan_types)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     // Parse command-line arguments
     let mut args = Args::parse();
+    
+    // If no_fix_redaction is specified, override the fix_redaction default
+    if args.no_fix_redaction {
+        args.fix_redaction = false;
+    }
+    
+    // Check if we're only fixing a log file without scanning
+    if let Some(log_file) = &args.fix_log_file {
+        match fix_redacted_log(log_file, &args.target) {
+            Ok(count) => {
+                println!("Fixed {} occurrences of [REDACTED] in {}", count, log_file.display());
+                println!("A backup was created at {}.bak", log_file.display());
+                return Ok(());
+            },
+            Err(e) => {
+                eprintln!("Error fixing log file: {}", e);
+                return Err(e);
+            }
+        }
+    }
     
     // Setup colors for output
     let colors = Colors::new(args.color);
@@ -678,7 +797,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     
     // Select protocol variant for mimic scans if applicable and not specified
-    if args.scan_types.contains(&ScanTypeArg::Mimic) && args.protocol_variant.is_none() {
+    if args.scan_types_str.contains("mimic") && args.protocol_variant.is_none() {
         let variants = ["1.0", "1.1", "2.0"];
         args.protocol_variant = Some(variants[thread_rng().gen_range(0..variants.len())].to_string());
         println!("[{}+{}] Using HTTP/{} for protocol mimicry", 
@@ -740,10 +859,8 @@ async fn main() -> Result<(), anyhow::Error> {
         process::exit(1);
     }
     
-    // Convert scan type args to ScanType model
-    let scan_types: Vec<ScanType> = args.scan_types.into_iter()
-        .map(ScanType::from)
-        .collect();
+    // Parse scan types from string, handling spaces after commas
+    let scan_types = parse_scan_types(&args.scan_types_str)?;
     
     // Check if we need raw socket privileges
     let needs_raw_sockets = scanner::requires_raw_sockets(&scan_types);
@@ -752,6 +869,9 @@ async fn main() -> Result<(), anyhow::Error> {
         eprintln!("Error: This scan requires root/administrator privileges");
         process::exit(1);
     }
+    
+    // Print scan types being used
+    println!("[{}+{}] Using scan types: {}", colors.green, colors.reset, args.scan_types_str);
     
     // Create scanner instance with enhanced evasion options
     let mut scanner = QuantumScanner::new(
@@ -891,6 +1011,27 @@ async fn main() -> Result<(), anyhow::Error> {
                 Ok(_) => println!("[{}+{}] RAM disk cleaned up successfully", colors.green, colors.reset),
                 Err(e) => println!("[{}!{}] Failed to clean up RAM disk: {}", 
                     colors.yellow, colors.reset, e),
+            }
+        }
+    }
+    
+    // If fix_redaction is enabled, process the log file
+    if args.fix_redaction && !args.memory_only {
+        let log_file = PathBuf::from("scanner.log");
+        if log_file.exists() {
+            match fix_redacted_log(&log_file, &args.target) {
+                Ok(count) => {
+                    if count > 0 {
+                        println!("[{}+{}] Fixed {} occurrences of [REDACTED] in logs", 
+                            colors.green, colors.reset, count);
+                        println!("[{}+{}] A backup was created at {}.bak", 
+                            colors.green, colors.reset, log_file.display());
+                    }
+                },
+                Err(e) => {
+                    println!("[{}!{}] Error fixing log redaction: {}", 
+                        colors.yellow, colors.reset, e);
+                }
             }
         }
     }
