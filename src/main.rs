@@ -630,14 +630,16 @@ async fn main() -> Result<(), anyhow::Error> {
     };
     
     // Check for RAM disk support for temporary files
-    let ramdisk = if args.memory_only && args.use_ramdisk {
+    let ramdisk = if args.use_ramdisk {
         match create_ramdisk(args.use_ramdisk, &args.ramdisk_mount, args.ramdisk_size) {
             Ok(Some(path)) => {
                 println!("[{}+{}] Created RAM disk for temporary files at {}", 
                     colors.green, colors.reset, path.display());
                 
-                // Use RAM disk for log file
-                args.log_file = path.join("scanner.log");
+                // Use RAM disk for log file ONLY if not in memory-only mode
+                if !args.memory_only {
+                    args.log_file = path.join("scanner.log");
+                }
                 Some(path)
             },
             Ok(None) => None,

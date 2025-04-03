@@ -147,7 +147,7 @@ cat > quantum_scanner.config << EOL
   "timeout_ms": 1000,
   "threads": 10,
   "evasion": true,
-  "scan_types": ["syn", "connect", "fin", "null", "xmas", "udp"]
+  "scan_types": ["syn", "fin", "null", "xmas", "udp"]
 }
 EOL
 

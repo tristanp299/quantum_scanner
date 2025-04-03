@@ -2,7 +2,7 @@
 name = "quantum_scanner"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name"]
+authors = ["Hamb0n3"]
 description = "Advanced port scanner with evasion capabilities"
 
 # Remove any profile settings that might be causing conflicts
