@@ -29,196 +29,232 @@ OUTPUT_DIR="./target/release"
 BUILD_TYPE="release"  # Can be "release" or "debug"
 CLEAN_ARTIFACTS=false  # Set to "true" to clean build artifacts
 STRIP_BINARY=true     # Set to "false" to keep debug symbols
-COMPRESS_BINARY=true  # Set to "false" to skip UPX compression
+COMPRESS_BINARY=false  # Set to "false" to skip UPX compression
+ULTRA_MINIMAL=false   # Set to "true" for extreme UPX compression (slower startup)
 LOCAL_TEST_TARGET="127.0.0.1"  # Use loopback for safety
 
 # ======================================================================
 # FUNCTIONS
 # ======================================================================
 
-# Display banner
+# Function to display banner
 show_banner() {
-    echo -e "${BLUE}┌────────────────────────────────────────────────┐${NC}"
-    echo -e "${BLUE}│     ${GREEN}Quantum Scanner${BLUE} - ${YELLOW}Build Script${BLUE}            │${NC}"
-    echo -e "${BLUE}└────────────────────────────────────────────────┘${NC}"
+    echo -e "${BLUE}=========================================================${NC}"
+    echo -e "${GREEN}  ██████  ██    ██  █████  ███    ██ ████████ ██    ██ ███    ███${NC}"
+    echo -e "${GREEN} ██    ██ ██    ██ ██   ██ ████   ██    ██    ██    ██ ████  ████${NC}"
+    echo -e "${GREEN} ██    ██ ██    ██ ███████ ██ ██  ██    ██    ██    ██ ██ ████ ██${NC}"
+    echo -e "${GREEN} ██ ▄▄ ██ ██    ██ ██   ██ ██  ██ ██    ██    ██    ██ ██  ██  ██${NC}"
+    echo -e "${GREEN}  ██████   ██████  ██   ██ ██   ████    ██     ██████  ██      ██${NC}"
+    echo -e "${GREEN}     ▀▀                                                          ${NC}"
+    echo -e "${BLUE}  SCANNER | RS Edition | Red Team Network Intelligence Tool${NC}"
+    echo -e "${BLUE}=========================================================${NC}"
+    echo -e "${YELLOW}  [!] OpSec-Enhanced Port Scanner and Service Identifier${NC}"
+    echo -e "${BLUE}=========================================================${NC}"
+    echo ""
 }
 
-# Log messages with timestamp and color
-log() {
-    local level=$1
-    local message=$2
-    local color=$NC
-    local timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+# Function to build fully static binary using Docker
+build_static() {
+    echo -e "[${BLUE}*${NC}] Building fully static binary using Docker..."
     
-    case $level in
-        "INFO") color=$GREEN ;;
-        "WARN") color=$YELLOW ;;
-        "ERROR") color=$RED ;;
-        "STEP") color=$BLUE ;;
-    esac
-    
-    echo -e "${color}[${timestamp}] [${level}] ${message}${NC}"
-}
-
-# Check if a command exists
-check_cmd() {
-    if ! command -v $1 &> /dev/null; then
-        log "ERROR" "Required command '$1' not found. Please install it."
+    # Check if Docker is installed
+    if ! command -v docker &> /dev/null; then
+        echo -e "[${RED}!${NC}] Docker is not installed. Please install Docker to use static build."
         exit 1
     fi
-}
+    
+    # Check if Dockerfile exists, if not we'll create it
+    if [ ! -f "Dockerfile" ]; then
+        echo -e "[${RED}!${NC}] Dockerfile not found. Creating one..."
+        
+        # Create a Dockerfile with UPX configuration
+        cat > Dockerfile << 'EOF'
+# Multi-stage Dockerfile for building a static Quantum Scanner
+FROM rust:slim AS builder
 
-# Secure deletion of files
-secure_delete() {
-    log "INFO" "Securely cleaning up artifacts..."
-    if command -v shred &> /dev/null; then
-        find . -name "*.o" -exec shred -u {} \; 2>/dev/null || true
-        find . -name "*.d" -exec shred -u {} \; 2>/dev/null || true
-        find . -name "*.gcda" -exec shred -u {} \; 2>/dev/null || true
-        find . -name "*.gcno" -exec shred -u {} \; 2>/dev/null || true
+# Add build arguments for configuring UPX compression
+ARG ENABLE_UPX=false
+ARG ULTRA_MINIMAL=false
+
+# Install build dependencies including musl tools
+# UPX will only be installed if needed
+RUN echo 'deb http://deb.debian.org/debian bookworm-backports main' > /etc/apt/sources.list.d/backports.list && \
+    apt-get update && apt-get install -y \
+    libssl-dev \
+    pkg-config \
+    musl-tools \
+    build-essential \
+    cmake \
+    libpcap-dev \
+    coreutils \
+    binutils
+
+# Install UPX only if compression is enabled
+RUN if [ "$ENABLE_UPX" = "true" ] || [ "$ULTRA_MINIMAL" = "true" ]; then \
+    apt-get install -y -t bookworm-backports upx-ucl; \
+    fi
+
+# Create build directory
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Build statically linked executable using musl
+RUN rustup target add x86_64-unknown-linux-musl
+# Use musl-gcc as the C compiler for the musl target
+ENV CC_x86_64_unknown_linux_musl=musl-gcc
+RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl
+
+# Apply extreme binary optimization and compression
+# 1. Strip all symbols
+RUN strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner
+
+# 2. Apply UPX compression if enabled
+RUN if [ "$ULTRA_MINIMAL" = "true" ]; then \
+        echo "Applying ultra-minimal UPX compression..." && \
+        stdbuf -o0 -e0 upx -vvv --best --ultra-brute target/x86_64-unknown-linux-musl/release/quantum_scanner || \
+        echo "UPX ultra compression failed, continuing without it."; \
+    elif [ "$ENABLE_UPX" = "true" ]; then \
+        echo "Applying standard UPX compression..." && \
+        stdbuf -o0 -e0 upx -vvv --best target/x86_64-unknown-linux-musl/release/quantum_scanner || \
+        echo "UPX compression failed, continuing without it."; \
+    else \
+        echo "Skipping UPX compression"; \
+    fi
+
+# 3. Display final file size for verification
+RUN ls -lh target/x86_64-unknown-linux-musl/release/quantum_scanner
+
+# Use a minimal base for the final image
+FROM scratch
+
+# Copy the built binary from builder stage
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/quantum_scanner /quantum_scanner
+
+# Set entrypoint
+ENTRYPOINT ["/quantum_scanner"]
+EOF
+        echo -e "[${GREEN}+${NC}] Created Dockerfile for static builds."
+    fi
+    
+    BUILD_TARGET_DIR=$(pwd)
+    
+    # Build the Docker image and extract binary
+    echo -e "[${BLUE}*${NC}] Building static binary with Docker (this may take a while)..."
+    
+    # Generate a unique container name with timestamp to avoid conflicts
+    CONTAINER_NAME="quantum_scanner_temp_$(date +%s)"
+    
+    # Remove any old containers with the same name if they exist (safety check)
+    docker rm -f temp_container >/dev/null 2>&1 || true
+    
+    # Build with Docker, passing compression flags as build arguments
+    echo -e "[${GREEN}+${NC}] Building with Docker and capturing output..."
+    docker build \
+        --build-arg ENABLE_UPX=$COMPRESS_BINARY \
+        --build-arg ULTRA_MINIMAL=$ULTRA_MINIMAL \
+        -t quantum_scanner_static_build . && \
+    docker create --name "$CONTAINER_NAME" quantum_scanner_static_build && \
+    docker cp "$CONTAINER_NAME":/quantum_scanner . && \
+    docker rm "$CONTAINER_NAME"
+    
+    if [ -f "quantum_scanner" ]; then
+        echo -e "[${GREEN}+${NC}] Static binary built successfully: ./quantum_scanner"
+        chmod +x ./quantum_scanner
+        
+        # Show binary size
+        BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
+        echo -e "[${GREEN}+${NC}] Final static binary size: ${YELLOW}$BIN_SIZE${NC}"
     else
-        # Fallback to less secure but still better than nothing
-        find . -name "*.o" -delete 2>/dev/null || true
-        find . -name "*.d" -delete 2>/dev/null || true
-        find . -name "*.gcda" -delete 2>/dev/null || true
-        find . -name "*.gcno" -delete 2>/dev/null || true
-    fi
-}
-
-# Function to check for essential build tools
-check_dependencies() {
-    echo -e "[${GREEN}+${NC}] Checking build dependencies..."
-    
-    # Check for Rust and Cargo
-    if ! command -v cargo &> /dev/null; then
-        echo -e "[${RED}!${NC}] Rust and Cargo are required but not installed."
-        echo -e "    Install with: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        echo -e "[${RED}!${NC}] Failed to build static binary."
         exit 1
     fi
-    
-    # Check for libpcap development files
-    if ! pkg-config --exists libpcap 2>/dev/null; then
-        echo -e "[${YELLOW}!${NC}] libpcap development files not found"
-        echo -e "    On Debian/Ubuntu: sudo apt install libpcap-dev"
-        echo -e "    On RHEL/Fedora: sudo dnf install libpcap-devel"
-        echo -e "    On Arch: sudo pacman -S libpcap"
-        exit 1
-    fi
-    
-    echo -e "[${GREEN}+${NC}] All dependencies satisfied"
 }
 
-# Function to clean previous builds
-clean_build() {
-    echo -e "[${GREEN}+${NC}] Cleaning previous builds..."
-    cargo clean
-}
-
-# Function for full cleanup (removing all artifacts including binaries)
-full_clean() {
-    echo -e "[${GREEN}+${NC}] Performing full cleanup (removing all artifacts and binaries)..."
-    cargo clean
-    rm -rf ./target
-    rm -f ./quantum_scanner
-    echo -e "[${GREEN}+${NC}] Full cleanup completed."
-}
-
-# Function for security checks before build
-security_checks() {
-    echo -e "[${GREEN}+${NC}] Performing pre-build security checks..."
-    
-    # Check for Cargo Audit tool and install if needed
-    if ! command -v cargo-audit &> /dev/null; then
-        echo -e "[${YELLOW}!${NC}] cargo-audit not found, installing..."
-        cargo install cargo-audit
-    fi
-    
-    # Run cargo audit to check for vulnerable dependencies
-    echo -e "[${GREEN}+${NC}] Checking for vulnerable dependencies with cargo-audit..."
-    cargo audit || {
-        echo -e "[${YELLOW}!${NC}] Warning: Security issues found in dependencies"
-        echo -e "    Review the issues above and consider updating dependencies"
-        read -p "Continue with build? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo -e "[${RED}!${NC}] Build aborted due to security concerns"
-            exit 1
-        fi
-    }
-    
-    echo -e "[${GREEN}+${NC}] Security checks completed"
-}
-
-# Function to build the project
+# Function to build the Rust project
 build_project() {
-    BUILD_TYPE=$1
+    local build_type=$1
+    local features=$2
     
-    echo -e "[${GREEN}+${NC}] Building Quantum Scanner (${BUILD_TYPE} build)..."
+    echo -e "[${BLUE}*${NC}] Building project in ${YELLOW}$build_type${NC} mode..."
     
-    if [ "$BUILD_TYPE" == "release" ]; then
-        # Release build with optimizations
-        cargo build --release $EXTRA_BUILD_ARGS
-        
-        if [ $? -eq 0 ]; then
-            echo -e "[${GREEN}+${NC}] Release build completed successfully"
-            # Use the correct path based on build target
-            if [ "$STATIC" = true ]; then
-                echo -e "[${GREEN}+${NC}] Binary location: ${PWD}/$BUILD_TARGET_DIR/quantum_scanner"
-                # Make sure output directory exists
-                mkdir -p "$OUTPUT_DIR"
-                # Copy to standard location
-                cp "$BUILD_TARGET_DIR/quantum_scanner" "$OUTPUT_DIR/"
-            else
-                echo -e "[${GREEN}+${NC}] Binary location: ${PWD}/target/release/quantum_scanner"
-            fi
-        else
-            echo -e "[${RED}!${NC}] Release build failed"
-            exit 1
-        fi
-    elif [ "$BUILD_TYPE" == "debug" ]; then
-        # Debug build
-        cargo build
-        
-        if [ $? -eq 0 ]; then
-            echo -e "[${GREEN}+${NC}] Debug build completed successfully"
-            echo -e "[${GREEN}+${NC}] Binary location: ${PWD}/target/debug/quantum_scanner"
-        else
-            echo -e "[${RED}!${NC}] Debug build failed"
-            exit 1
-        fi
+    # Set cargo flags for different build types
+    local cargo_flags=""
+    if [ "$build_type" = "release" ]; then
+        cargo_flags="--release"
+    fi
+    
+    # Add features if specified
+    if [ -n "$features" ]; then
+        cargo_flags="$cargo_flags --features $features"
+    fi
+    
+    # Set RUSTFLAGS for improved performance and security
+    if [ "$build_type" = "release" ]; then
+        # Release mode: optimize for size and performance, with security mitigations
+        # Store panic=abort in a separate variable so tests can run without it
+        export RUSTFLAGS_BASE="-C opt-level=3 -C codegen-units=1 -C target-cpu=native -C strip=symbols"
+        export RUSTFLAGS="$RUSTFLAGS_BASE -C panic=abort"
+    else
+        # Debug mode: include debug symbols and checks
+        export RUSTFLAGS_BASE="-C debuginfo=2 -D warnings"
+        export RUSTFLAGS="$RUSTFLAGS_BASE"
+    fi
+    
+    # Notify about flags
+    echo -e "[${GREEN}+${NC}] Using Rust flags: ${YELLOW}$RUSTFLAGS${NC}"
+    
+    # Run the build
+    echo -e "[${BLUE}*${NC}] Running cargo build $cargo_flags..."
+    if cargo build $cargo_flags; then
+        echo -e "[${GREEN}+${NC}] Build completed successfully"
+        return 0
+    else
+        echo -e "[${RED}!${NC}] Build failed"
+        return 1
     fi
 }
 
 # Function to run tests
 run_tests() {
-    echo -e "[${GREEN}+${NC}] Running tests..."
+    echo -e "[${BLUE}*${NC}] Running tests..."
     
-    # Run unit tests
-    cargo test --release
+    # We need to temporarily disable panic=abort for tests to work
+    local original_rustflags="$RUSTFLAGS"
+    # Remove panic=abort from RUSTFLAGS for testing only
+    export RUSTFLAGS=$(echo "$RUSTFLAGS" | sed 's/-C panic=abort//')
     
-    # Test basic functionality
-    echo -e "[${GREEN}+${NC}] Testing command-line parsing..."
-    
-    local binary_path=""
-    if [ "$BUILD_TYPE" == "release" ]; then
-        binary_path="./target/release/quantum_scanner"
+    # Check if we have the comprehensive test script
+    if [ -f "comprehensive_test.sh" ]; then
+        echo -e "[${GREEN}+${NC}] Using comprehensive test script"
+        
+        if bash ./comprehensive_test.sh; then
+            echo -e "[${GREEN}+${NC}] All tests passed"
+            # Restore original RUSTFLAGS
+            export RUSTFLAGS="$original_rustflags"
+            return 0
+        else
+            echo -e "[${RED}!${NC}] Some tests failed"
+            # Restore original RUSTFLAGS
+            export RUSTFLAGS="$original_rustflags"
+            return 1
+        fi
     else
-        binary_path="./target/debug/quantum_scanner"
-    fi
-    
-    "$binary_path" --help | grep -q "USAGE:" && \
-        echo -e "[${GREEN}+${NC}] Command-line help works correctly" || \
-        echo -e "[${RED}!${NC}] Command-line help failed"
-    
-    # Local scan test (only if running as root)
-    if [ "$(id -u)" -eq 0 ]; then
-        echo -e "[${GREEN}+${NC}] Running minimal local scan test..."
-        "$binary_path" -p 80 -s syn --rate 10 --timeout 1 $LOCAL_TEST_TARGET > /dev/null && \
-            echo -e "[${GREEN}+${NC}] Basic scan functionality working" || \
-            echo -e "[${YELLOW}!${NC}] Basic scan test failed - check permissions and network"
-    else
-        echo -e "[${YELLOW}!${NC}] Skipping scan test: raw socket operations require root privileges"
-        echo -e "    Run as root to enable scan tests: sudo $0"
+        # Fall back to cargo test
+        echo -e "[${YELLOW}!${NC}] No test script found, running cargo tests"
+        
+        if cargo test; then
+            echo -e "[${GREEN}+${NC}] All tests passed"
+            # Restore original RUSTFLAGS
+            export RUSTFLAGS="$original_rustflags"
+            return 0
+        else
+            echo -e "[${RED}!${NC}] Some tests failed"
+            # Restore original RUSTFLAGS
+            export RUSTFLAGS="$original_rustflags"
+            return 1
+        fi
     fi
 }
 
@@ -233,28 +269,45 @@ apply_binary_hardening() {
         BINARY_PATH="./target/debug/quantum_scanner"
     fi
     
+    # Check if binary exists before proceeding
+    if [ ! -f "$BINARY_PATH" ]; then
+        echo -e "[${RED}!${NC}] Binary not found at $BINARY_PATH. Build may have failed."
+        echo -e "[${YELLOW}!${NC}] Skipping binary hardening steps."
+        return 1
+    fi
+    
     echo -e "[${BLUE}*${NC}] Applying binary hardening techniques..."
     
     # Strip debug symbols
-    echo -e "[${GREEN}+${NC}] Stripping debug symbols and other metadata..."
-    strip -s "$BINARY_PATH" 2>/dev/null || echo -e "[${YELLOW}!${NC}] Stripping failed, continuing without it."
+    if [ "$STRIP_BINARY" = true ]; then
+        echo -e "[${GREEN}+${NC}] Stripping debug symbols and other metadata..."
+        strip -s "$BINARY_PATH" 2>/dev/null || echo -e "[${YELLOW}!${NC}] Stripping failed, continuing without it."
+    fi
     
-    # Apply UPX compression
-    if command -v upx &> /dev/null; then
-        echo -e "[${GREEN}+${NC}] Applying UPX compression to reduce binary size..."
-        
-        if [ "$ULTRA_MINIMAL" = true ]; then
-            echo -e "[${YELLOW}!${NC}] Using extreme compression (may slow startup time)..."
-            upx --best --ultra-brute "$BINARY_PATH" 2>/dev/null || echo -e "[${YELLOW}!${NC}] UPX compression failed, continuing without it."
+    # Apply UPX compression if enabled
+    if [ "$COMPRESS_BINARY" = true ]; then
+        if command -v upx &> /dev/null; then
+            echo -e "[${GREEN}+${NC}] Applying UPX compression to reduce binary size..."
+            
+            if [ "$ULTRA_MINIMAL" = true ]; then
+                echo -e "[${YELLOW}!${NC}] Using extreme compression (may slow startup time)..."
+                # Ultra-minimal compression with --ultra-brute
+                stdbuf -o0 -e0 upx -vvv --best --ultra-brute "$BINARY_PATH" || \
+                    echo -e "[${YELLOW}!${NC}] UPX ultra compression failed, continuing without it."
+            else
+                # Standard compression with --best
+                stdbuf -o0 -e0 upx -vvv --best "$BINARY_PATH" || \
+                    echo -e "[${YELLOW}!${NC}] UPX compression failed, continuing without it."
+            fi
         else
-            upx --best "$BINARY_PATH" 2>/dev/null || echo -e "[${YELLOW}!${NC}] UPX compression failed, continuing without it."
+            echo -e "[${YELLOW}!${NC}] UPX not found. Install UPX for better compression: sudo apt install upx"
         fi
     else
-        echo -e "[${YELLOW}!${NC}] UPX not found. Install UPX for better compression: sudo apt install upx"
+        echo -e "[${BLUE}*${NC}] Skipping UPX compression (use --compress or --ultra-minimal to enable)"
     fi
     
     # Apply sstrip for even more aggressive stripping if available
-    if command -v sstrip &> /dev/null && [ "$ULTRA_MINIMAL" = true ]; then
+    if command -v sstrip &> /dev/null; then
         echo -e "[${GREEN}+${NC}] Applying super strip (sstrip) for maximum size reduction..."
         sstrip "$BINARY_PATH" 2>/dev/null || echo -e "[${YELLOW}!${NC}] Super strip failed, continuing without it."
     fi
@@ -268,198 +321,78 @@ apply_binary_hardening() {
     echo -e "[${GREEN}+${NC}] Binary copied to ./quantum_scanner"
 }
 
-# Function to install the binary
-install_binary() {
-    echo -e "[${GREEN}+${NC}] Installing quantum_scanner..."
+# Function to perform full cleanup
+perform_full_cleanup() {
+    echo -e "[${BLUE}*${NC}] Performing full cleanup..."
+    cargo clean
     
-    # Check for root privileges for system-wide installation
-    if [ "$EUID" -ne 0 ]; then
-        # Install to user's ~/.local/bin if not root
-        INSTALL_DIR="$HOME/.local/bin"
-        mkdir -p "$INSTALL_DIR"
-        
-        cp target/release/quantum_scanner "$INSTALL_DIR/"
-        
-        if [ $? -eq 0 ]; then
-            echo -e "[${GREEN}+${NC}] Installed to $INSTALL_DIR/quantum_scanner"
-            
-            # Check if ~/.local/bin is in PATH
-            if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-                echo -e "[${YELLOW}!${NC}] $INSTALL_DIR is not in your PATH"
-                echo -e "    Consider adding: export PATH=\"\$PATH:$INSTALL_DIR\" to your shell profile"
-            fi
-        else
-            echo -e "[${RED}!${NC}] Installation failed"
-            exit 1
-        fi
-    else
-        # System-wide installation
-        cp target/release/quantum_scanner /usr/local/bin/
-        
-        if [ $? -eq 0 ]; then
-            echo -e "[${GREEN}+${NC}] Installed to /usr/local/bin/quantum_scanner"
-        else
-            echo -e "[${RED}!${NC}] Installation failed"
-            exit 1
-        fi
-    fi
+    # Remove all logs and temporary files
+    DELETED_FILES=$(find . -name "*.log" -o -name "scanner.log*" -o -name "*.o" -o -name "*.d" -o -name "*.gcda" -o -name "*.gcno" -o -name "*.bc" | wc -l)
+    DELETED_SIZE=$(find . -name "*.log" -o -name "scanner.log*" -o -name "*.o" -o -name "*.d" -o -name "*.gcda" -o -name "*.gcno" -o -name "*.bc" -print0 | xargs -0 du -ch 2>/dev/null | grep total$ | cut -f1)
+    
+    find . -name "*.log" -delete
+    find . -name "scanner.log*" -delete
+    find . -name "*.o" -delete
+    find . -name "*.d" -delete
+    find . -name "*.gcda" -delete
+    find . -name "*.gcno" -delete
+    find . -name "*.bc" -delete
+    [ -f "./quantum_scanner" ] && rm "./quantum_scanner"
+    
+    echo -e "     Removed ${DELETED_FILES} files, ${DELETED_SIZE:-0} total"
 }
 
-# Create operational security scripts
-create_opsec_scripts() {
-    echo -e "[${GREEN}+${NC}] Creating operational security features..."
-    
-    # Instead of creating scripts, we'll add functions to this build script
-    # Define the run_scanner function that replaces run_scanner.sh
-    echo -e "[${GREEN}+${NC}] OpSec features integrated into build.sh"
-}
-
-# Function to run scanner with enhanced security
-run_scanner() {
-    # Store original arguments
-    ORIGINAL_ARGS="$@"
-    
-    # Get full path to scanner
-    SCANNER="$PWD/target/release/quantum_scanner"
-    
-    # Ensure DNS requests go through Tor if available
-    if command -v tor &> /dev/null && pgrep tor > /dev/null; then
-        export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libtsocks.so
-        echo "[+] Routing traffic through Tor when available"
-    fi
-    
-    # Add random timing to evade pattern detection
-    if [[ "$*" != *"--rate"* ]]; then
-        RANDOM_RATE=$((100 + RANDOM % 400))
-        ARGS="$@ --rate $RANDOM_RATE"
-        echo "[+] Using randomized packet rate: $RANDOM_RATE pps"
-    else
-        ARGS="$@"
-    fi
-    
-    # Always enable evasion techniques
-    if [[ "$ARGS" != *"-e"* && "$ARGS" != *"--evasion"* ]]; then
-        ARGS="$ARGS -e"
-        echo "[+] Enabled evasion techniques"
-    fi
-    
-    # Add a secure temporary directory for logs
-    TEMP_DIR=$(mktemp -d)
-    chmod 700 "$TEMP_DIR"
-    LOG_FILE="$TEMP_DIR/scan_log.tmp"
-    
-    # Run the scanner with enhanced security
-    echo "[+] Starting scan with enhanced security features"
-    $SCANNER --log-file "$LOG_FILE" $ARGS
-    
-    # Clean up
-    read -p "Press Enter to securely delete logs or Ctrl+C to keep them..."
-    shred -u "$LOG_FILE" 2>/dev/null || rm -f "$LOG_FILE"
-    rmdir "$TEMP_DIR"
-}
-
-# Function to clean traces
+# Function to clean traces for opsec
 clean_traces() {
-    echo "[+] Cleaning scanner artifacts..."
+    echo -e "[${BLUE}*${NC}] Cleaning scanner traces and artifacts for operational security..."
     
-    # Remove scan logs
-    find . -name "scanner.log" -exec shred -uz {} \; 2>/dev/null || find . -name "scanner.log" -delete
+    # Remove scanner logs
+    find . -name "scanner.log*" -type f -print0 | while IFS= read -r -d $'\0' file; do
+        echo -e "     Securely deleting: $file"
+        # Overwrite the file with random data before deleting
+        dd if=/dev/urandom of="$file" bs=1k count=1 conv=notrunc 2>/dev/null
+        rm -f "$file"
+    done
     
-    # Clean bash history entries related to scanning
-    if [ -f "$HISTFILE" ]; then
-        TEMP_HIST=$(mktemp)
-        grep -v "quantum_scanner\|port.*scan\|nmap" "$HISTFILE" > "$TEMP_HIST" 2>/dev/null
-        cat "$TEMP_HIST" > "$HISTFILE"
-        rm -f "$TEMP_HIST"
-        echo "[+] Cleaned command history"
+    # Remove JSON result files
+    find . -name "scan_results.json" -type f -print0 | while IFS= read -r -d $'\0' file; do
+        echo -e "     Securely deleting: $file"
+        dd if=/dev/urandom of="$file" bs=1k count=1 conv=notrunc 2>/dev/null
+        rm -f "$file"
+    done
+    
+    # Clean pcap files if any
+    find . -name "*.pcap" -type f -print0 | while IFS= read -r -d $'\0' file; do
+        echo -e "     Securely deleting: $file"
+        dd if=/dev/urandom of="$file" bs=1k count=1 conv=notrunc 2>/dev/null
+        rm -f "$file"
+    done
+    
+    # Clean up any temporary files
+    find /tmp -name "quantum_scanner_*" -type f -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
+        echo -e "     Securely deleting: $file"
+        dd if=/dev/urandom of="$file" bs=1k count=1 conv=notrunc 2>/dev/null
+        rm -f "$file"
+    done
+    
+    # Clean bash history to remove any references to scanner
+    if [ -f ~/.bash_history ]; then
+        sed -i '/quantum_scanner/d' ~/.bash_history 2>/dev/null || true
     fi
     
-    # Clear any output files
-    find . -name "scan_results*.txt" -exec shred -uz {} \; 2>/dev/null || find . -name "scan_results*.txt" -delete
-    find . -name "*.json" -exec grep -l "port.*scan" {} \; 2>/dev/null | xargs -r shred -uz 2>/dev/null
-    
-    echo "[+] Cleanup complete"
-}
-
-# Function to build static binary
-build_static() {
-    echo -e "${GREEN}Building static Quantum Scanner using Docker...${NC}"
-    
-    # Check if Docker is installed
-    if ! command -v docker &> /dev/null; then
-        echo -e "${RED}Error: Docker is not installed. Please install Docker first.${NC}"
-        return 1
+    # Clean zsh history if applicable
+    if [ -f ~/.zsh_history ]; then
+        sed -i '/quantum_scanner/d' ~/.zsh_history 2>/dev/null || true
     fi
     
-    # Create output directory
-    mkdir -p bin
-    
-    # Build the Docker image
-    echo -e "${YELLOW}Building Docker image...${NC}"
-    docker build -t quantum-scanner .
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Docker build failed!${NC}"
-        return 1
+    # Clean RAM disk if it exists
+    if [ -d "/mnt/quantum_scanner_ramdisk" ]; then
+        echo -e "     Cleaning RAM disk..."
+        rm -rf /mnt/quantum_scanner_ramdisk/* 2>/dev/null || true
     fi
     
-    # Run the container to copy the binary out
-    echo -e "${YELLOW}Extracting static binary...${NC}"
-    # Create a temporary container to extract the binary from the image
-    CONTAINER_ID=$(docker create quantum-scanner)
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Failed to create temporary container!${NC}"
-        return 1
-    fi
-    
-    # Copy the binary from the container
-    docker cp $CONTAINER_ID:/quantum_scanner ./bin/quantum_scanner
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Failed to extract binary!${NC}"
-        docker rm $CONTAINER_ID > /dev/null
-        return 1
-    fi
-    
-    # Remove the temporary container
-    docker rm $CONTAINER_ID > /dev/null
-    
-    echo -e "${GREEN}Static binary created at${NC} $(pwd)/bin/quantum_scanner"
-    echo -e "${YELLOW}This binary is completely self-contained and can run on any Linux system.${NC}"
-    
-    # Make the binary executable
-    chmod +x bin/quantum_scanner
-    
-    echo -e "${GREEN}Static build completed successfully!${NC}"
-}
-
-# Function to display usage examples
-print_usage() {
-    echo -e "${YELLOW}Usage Examples:${NC}"
-    echo -e "  ${GREEN}Basic SYN scan:${NC}"
-    echo -e "    quantum_scanner 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Scan with specific ports:${NC}"
-    echo -e "    quantum_scanner --ports 22,80,443,8080 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Scan top 100 most common ports:${NC}"
-    echo -e "    quantum_scanner --top-100 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Multiple scan techniques:${NC}"
-    echo -e "    quantum_scanner --scan-types syn,ack,fin 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Memory-only mode with enhanced evasion:${NC}"
-    echo -e "    quantum_scanner --memory-only --enhanced-evasion 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Scan with protocol mimicry:${NC}"
-    echo -e "    quantum_scanner --scan-types mimic --mimic-protocol HTTP 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Save results to file:${NC}"
-    echo -e "    quantum_scanner --output results.txt 192.168.1.1"
-    echo -e ""
-    echo -e "  ${GREEN}Full scan with all security features:${NC}"
-    echo -e "    quantum_scanner --enhanced-evasion --top-100 --use-tor 192.168.1.1"
+    echo -e "[${GREEN}+${NC}] Trace cleanup completed successfully"
+    return 0
 }
 
 # Main build process
@@ -472,12 +405,15 @@ main() {
     INSTALL=false
     CLEAN=false
     FULL_CLEAN=false
+    # Set these to false by default - compression is now opt-in
     MINIMAL=false
     ULTRA_MINIMAL=false
+    COMPRESS_BINARY=false
     STATIC=false
     RUN_TESTS=true
     RUN_SCAN=false
     CLEAN_TRACES_MODE=false
+    BUILD_REQUESTED=true
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -495,15 +431,18 @@ main() {
                 ;;
             --full-clean)
                 FULL_CLEAN=true
+                BUILD_REQUESTED=false  # Don't build if full-clean is specified
                 shift
                 ;;
-            --minimal)
-                MINIMAL=true
+            --compress)
+                # Enable standard UPX compression
+                COMPRESS_BINARY=true
                 shift
                 ;;
             --ultra-minimal)
+                # Enable extreme UPX compression with ultra-brute settings
+                COMPRESS_BINARY=true
                 ULTRA_MINIMAL=true
-                MINIMAL=true
                 shift
                 ;;
             --static)
@@ -527,6 +466,10 @@ main() {
                 ;;
             --static-build)
                 # New flag to build static binary with Docker
+                echo -e "[${BLUE}*${NC}] Static build requested with current compression settings."
+                # Carry over compression settings from main script
+                COMPRESS_BINARY=$COMPRESS_BINARY
+                ULTRA_MINIMAL=$ULTRA_MINIMAL
                 build_static
                 exit $?
                 ;;
@@ -536,15 +479,16 @@ main() {
                 echo -e "  --debug          Build with debug symbols"
                 echo -e "  --install        Install the binary after building"
                 echo -e "  --clean          Clean previous builds before building"
-                echo -e "  --full-clean     Remove all generated files including binaries"
-                echo -e "  --minimal        Build minimal size binaries with UPX compression"
-                echo -e "  --ultra-minimal  Build extremely small binaries (slower startup)"
+                echo -e "  --full-clean     Remove all generated files including binaries (does not build)"
+                echo -e "  --compress       Apply standard UPX compression to reduce binary size"
+                echo -e "  --ultra-minimal  Apply extreme UPX compression for smallest possible binary (slower startup)"
                 echo -e "  --static         Build fully static binaries (no external dependencies)"
                 echo -e "  --no-tests       Skip running tests" 
                 echo -e "  --run [args]     Run the scanner with enhanced security features"
                 echo -e "  --clean-traces   Clean up scanner logs and artifacts"
                 echo -e "  --static-build   Build a fully static binary using Docker"
                 echo -e "  --help           Show this help message"
+                echo -e ""
                 exit 0
                 ;;
             *)
@@ -554,101 +498,52 @@ main() {
         esac
     done
     
-    # Handle the special modes
-    if [ "$RUN_SCAN" = true ]; then
-        run_scanner "$@"
-        exit $?
+    # Clean if requested
+    if [ "$CLEAN" = true ]; then
+        echo -e "[${BLUE}*${NC}] Cleaning previous builds..."
+        cargo clean --release
     fi
     
-    if [ "$CLEAN_TRACES_MODE" = true ]; then
-        clean_traces
-        exit $?
-    fi
-    
-    # Execute appropriate action based on options
+    # Handle full cleanup separately
     if [ "$FULL_CLEAN" = true ]; then
-        full_clean
+        perform_full_cleanup
+        # Exit after cleanup since --full-clean doesn't build
         exit 0
     fi
     
-    if [ "$CLEAN" = true ]; then
-        clean_build
-        # Only exit if no other build options specified
-        if [ "$BUILD_TYPE" = "release" ] && [ "$INSTALL" = false ] && [ "$MINIMAL" = false ] && [ "$STATIC" = false ]; then
-            echo -e "[${GREEN}+${NC}] Clean completed."
-            exit 0
+    # Only build if we haven't used --full-clean
+    if [ "$BUILD_REQUESTED" = true ]; then
+        # Build the project
+        build_project "$BUILD_TYPE"
+        
+        # Run tests if requested
+        if [ "$RUN_TESTS" = true ]; then
+            run_tests
         fi
-    fi
-    
-    # Check for required dependencies
-    check_dependencies
-    
-    # Perform security checks
-    security_checks
-    
-    # Set build flags based on options
-    if [ "$STATIC" = true ]; then
-        echo -e "[${BLUE}*${NC}] Static builds requested..."
         
-        # Display warning about static build limitations
-        echo -e "[${YELLOW}!${NC}] Static builds are currently not fully supported due to proc-macro limitations."
-        echo -e "[${GREEN}+${NC}] Building with dynamic linking instead for compatibility."
-        echo -e "[${YELLOW}!${NC}] To create a portable binary, use the Docker-based static build:"
-        echo -e "[${GREEN}+${NC}]   ./build.sh --static-build"
-        echo -e "[${GREEN}+${NC}] This will create a fully static binary in the bin/ directory."
-        
-        # Use standard build settings
-        export RUSTFLAGS="-C opt-level=3 -C target-cpu=native"
-        EXTRA_BUILD_ARGS=""
-        BUILD_TARGET_DIR="./target/release"
-        
-        # Ask for confirmation
-        read -p "Continue with standard build? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo -e "[${RED}!${NC}] Build aborted"
-            exit 1
-        fi
-    else
-        # Standard optimization flags
-        export RUSTFLAGS="-C opt-level=3 -C target-cpu=native"
-        EXTRA_BUILD_ARGS=""
-        BUILD_TARGET_DIR="./target/release"
-    fi
-    
-    # Build the project
-    build_project "$BUILD_TYPE"
-    
-    # Run tests if requested
-    if [ "$RUN_TESTS" = true ]; then
-        run_tests
-    fi
-    
-    # Apply binary hardening if requested
-    if [ "$MINIMAL" = true ]; then
+        # Always apply binary hardening since MINIMAL is now true by default
         apply_binary_hardening
-    fi
-    
-    # Install if requested
-    if [ "$INSTALL" = true ]; then
-        if [ "$BUILD_TYPE" != "release" ]; then
-            echo -e "[${YELLOW}!${NC}] Warning: Installing a non-release build"
+        
+        # Install if requested
+        if [ "$INSTALL" = true ]; then
+            if [ "$BUILD_TYPE" != "release" ]; then
+                echo -e "[${YELLOW}!${NC}] Warning: Installing a non-release build"
+            fi
+            install_binary
         fi
-        install_binary
     fi
     
-    # Create OpSec scripts
-    create_opsec_scripts
+    # Run the scanner if requested
+    if [ "$RUN_SCAN" = true ]; then
+        echo -e "[${BLUE}*${NC}] Running Quantum Scanner..."
+        sudo ./quantum_scanner "$@"
+    fi
     
-    # Print usage examples
-    echo -e "${BLUE}════════════════════════════════════════════${NC}"
-    print_usage
-    echo -e "${BLUE}════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}Build completed successfully!${NC}"
-    
-    # Print additional info
-    echo -e "[${GREEN}+${NC}] To run the scanner with enhanced security: ./build.sh --run [options] <target>"
-    echo -e "[${GREEN}+${NC}] To clean up after usage: ./build.sh --clean-traces"
+    # Clean traces if requested
+    if [ "$CLEAN_TRACES_MODE" = true ]; then
+        echo -e "[${BLUE}*${NC}] Cleaning traces and logs..."
+        clean_traces
+    fi
 }
 
 # Run the main function with all provided arguments

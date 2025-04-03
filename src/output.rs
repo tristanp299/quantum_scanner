@@ -51,6 +51,40 @@ pub fn format_text_results(results: &ScanResults) -> String {
     }
     output.push_str("\n\n");
     
+    // Enhanced scan statistics
+    output.push_str("## Scan Statistics\n");
+    output.push_str(&format!("Packets sent: {}\n", results.packets_sent));
+    output.push_str(&format!("Successful operations: {}\n", results.successful_scans));
+    if results.packets_sent > 0 {
+        output.push_str(&format!("Success rate: {:.1}%\n", 
+                               (results.successful_scans as f64 / results.packets_sent as f64) * 100.0));
+    }
+    
+    // OS detection summary if available
+    if let Some(os_summary) = &results.os_summary {
+        output.push_str(&format!("OS detection: {}\n", os_summary));
+    }
+    
+    // Risk assessment if available
+    if let Some(risk) = &results.risk_assessment {
+        output.push_str(&format!("Risk assessment: {}\n", risk));
+    }
+    
+    output.push_str("\n");
+    
+    // Service categories if available
+    if let Some(categories) = &results.service_categories {
+        output.push_str("## Service Categories\n");
+        for (category, ports) in categories {
+            let ports_str = ports.iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            output.push_str(&format!("- {}: {}\n", category, ports_str));
+        }
+        output.push_str("\n");
+    }
+    
     // Open ports summary
     output.push_str(&format!("## Open Ports Summary\n"));
     if results.open_ports.is_empty() {
@@ -99,7 +133,10 @@ pub fn format_text_results(results: &ScanResults) -> String {
         let has_data = !port_result.tcp_states.is_empty() 
             || port_result.udp_state.is_some()
             || port_result.banner.is_some()
-            || port_result.cert_info.is_some();
+            || port_result.cert_info.is_some()
+            || port_result.vulns.len() > 0
+            || port_result.anomalies.len() > 0
+            || port_result.security_posture.is_some();
             
         if !has_data {
             continue;
@@ -128,6 +165,35 @@ pub fn format_text_results(results: &ScanResults) -> String {
             output.push_str(&format!("UDP State: {}\n", udp_state));
         }
         
+        // Enhanced security posture assessment
+        if let Some(posture) = &port_result.security_posture {
+            output.push_str("Security Assessment:\n");
+            for item in posture.split(';') {
+                output.push_str(&format!("  - {}\n", item.trim()));
+            }
+        }
+        
+        // Enhanced anomaly detection
+        if !port_result.anomalies.is_empty() {
+            output.push_str("Detected Anomalies:\n");
+            for anomaly in &port_result.anomalies {
+                output.push_str(&format!("  - {}\n", anomaly));
+            }
+        }
+        
+        // Timing analysis if available
+        if let Some(timing) = &port_result.timing_analysis {
+            output.push_str(&format!("Timing Analysis: {}\n", timing));
+        }
+        
+        // Enhanced service details
+        if let Some(details) = &port_result.service_details {
+            output.push_str("Service Details:\n");
+            for (key, value) in details {
+                output.push_str(&format!("  - {}: {}\n", key, value));
+            }
+        }
+        
         // Banner if available
         if let Some(banner) = &port_result.banner {
             output.push_str("Banner:\n");
@@ -146,10 +212,20 @@ pub fn format_text_results(results: &ScanResults) -> String {
             output.push_str(&format!("  Valid from: {}\n", cert.not_before));
             output.push_str(&format!("  Valid until: {}\n", cert.not_after));
             
+            if let Some(bits) = cert.public_key_bits {
+                output.push_str(&format!("  Key strength: {} bits ({})\n", 
+                    bits, 
+                    if bits < 2048 { "weak" } else { "strong" }));
+            }
+            
             if !cert.alt_names.is_empty() {
                 output.push_str("  Alternative Names:\n");
-                for name in &cert.alt_names {
+                for name in cert.alt_names.iter().take(5) {
                     output.push_str(&format!("    - {}\n", name));
+                }
+                
+                if cert.alt_names.len() > 5 {
+                    output.push_str(&format!("    ... and {} more\n", cert.alt_names.len() - 5));
                 }
             }
         }
@@ -187,7 +263,7 @@ pub fn save_text_results(results: &ScanResults, output_path: &Path) -> Result<()
     Ok(())
 }
 
-/// Format a single port result as text
+#[allow(dead_code)]
 fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<()> {
     // Basic port info
     let port_header = format!(
@@ -236,7 +312,7 @@ fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<(
             cert.not_before,
             cert.not_after
         )?;
-        writeln!(file, "- Algorithm: {}", cert.signature_algorithm)?;
+        writeln!(file, "- Signature Algo: {}", cert.signature_algorithm)?;
         if let Some(bits) = cert.public_key_bits {
             writeln!(file, "- Key: {} {} bits", 
                 cert.key_algorithm.as_deref().unwrap_or("Unknown"),
@@ -259,10 +335,7 @@ fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<(
     Ok(())
 }
 
-/// Print scan results to the terminal
-///
-/// # Arguments
-/// * `results` - The scan results to display
+#[allow(dead_code)]
 pub fn print_results(results: &ScanResults) -> Result<()> {
     let term = Term::stdout();
     term.clear_screen()?;
@@ -304,7 +377,7 @@ pub fn print_results(results: &ScanResults) -> Result<()> {
     Ok(())
 }
 
-/// Print a summary line for a single port
+#[allow(dead_code)]
 fn print_port_summary(port: u16, result: &PortResult) {
     // Get the first "open" state
     let state = result.tcp_states.iter()
@@ -321,75 +394,192 @@ fn print_port_summary(port: u16, result: &PortResult) {
     );
 }
 
-/// Print detailed information for interesting ports
+#[allow(dead_code)]
 fn print_detailed_results(results: &ScanResults) -> Result<()> {
     let mut ports: Vec<_> = results.open_ports.iter().collect();
     ports.sort_unstable();
     
+    let _term = Term::stdout(); // Use Term for potential future styling consistency
+
+    if ports.is_empty() {
+        // No open ports, nothing more to detail here
+        return Ok(());
+    }
+
+    println!("\n{}", style("DETAILED PORT INFORMATION:").cyan().bold().underlined());
+
     for &port in ports {
         if let Some(result) = results.results.get(&port) {
-            // Only print detailed info if there's something interesting
-            let has_details = result.banner.is_some() || 
-                              result.cert_info.is_some() || 
-                              !result.vulns.is_empty();
+            println!("\n--- Port {} ---", style(port).green().bold());
+
+            // Service and Version
+            if let Some(service) = &result.service {
+                println!("  {}: {}", style("Service").yellow(), service);
+            }
+            if let Some(version) = &result.version {
+                println!("  {}: {}", style("Version").yellow(), version);
+            }
+
+            // Detailed TCP states per scan type
+            if !result.tcp_states.is_empty() {
+                println!("  {}", style("TCP States").yellow());
+                // Sort scan types for consistent output order
+                let mut tcp_states_vec: Vec<_> = result.tcp_states.iter().collect();
+                tcp_states_vec.sort_by_key(|(scan_type, _)| format!("{}", scan_type)); // Sort alphabetically by scan type name
+                for (scan_type, status) in tcp_states_vec {
+                    println!("    - {:<8}: {}", format!("{}", scan_type), status);
+                }
+            }
+
+            // UDP state
+            if let Some(udp_state) = &result.udp_state {
+                println!("  {}: {}", style("UDP State").yellow(), udp_state);
+            }
+
+            // Filtering information
+            if let Some(filtering) = &result.filtering {
+                println!("  {}: {}", style("Filtering").yellow(), filtering);
+            }
+
+            // OS Guess
+            if let Some(os_guess) = &result.os_guess {
+                println!("  {}: {}", style("OS Guess").yellow(), os_guess);
+            }
             
-            if has_details {
-                println!("\n{} {}", style("Details for port").cyan().bold(), style(port).green().bold());
+            // Enhanced security posture
+            if let Some(security) = &result.security_posture {
+                println!("  {}", style("Security Assessment").yellow());
+                for item in security.split(';') {
+                    println!("    - {}", item.trim());
+                }
+            }
+            
+            // Enhanced anomaly detection
+            if !result.anomalies.is_empty() {
+                println!("  {}", style("Detected Anomalies").yellow());
+                for anomaly in &result.anomalies {
+                    println!("    - {}", anomaly);
+                }
+            }
+            
+            // Enhanced service details
+            if let Some(details) = &result.service_details {
+                println!("  {}", style("Service Details").yellow());
+                for (key, value) in details {
+                    println!("    - {}: {}", key, value);
+                }
+            }
+
+            // Scan Timestamp
+            println!("  {}: {}", style("Scan Time").yellow(), result.scan_time.format("%Y-%m-%d %H:%M:%S UTC"));
+
+            // Print banner if available (truncated and sanitized)
+            if let Some(banner) = &result.banner {
+                println!("  {}", style("Banner").yellow());
+                let sanitized = sanitize_banner(banner); // Use existing sanitize function
+                let truncated = if sanitized.len() > 250 { // Limit banner length in detailed view too
+                    format!("{}... [truncated]", &sanitized[..250])
+                } else {
+                    sanitized
+                };
+                 // Indent banner lines
+                for line in truncated.lines() {
+                    println!("    {}", line);
+                }
+            }
+            
+            // Print certificate info
+            if let Some(cert) = &result.cert_info {
+                println!("  {}", style("SSL Certificate").yellow());
+                println!("    Subject: {}", cert.subject);
+                println!("    Issuer: {}", cert.issuer);
+                println!("    Valid: {} to {}", 
+                    cert.not_before,
+                    cert.not_after
+                );
                 
-                // Print banner if available (truncated)
-                if let Some(banner) = &result.banner {
-                    let truncated = if banner.len() > 200 {
-                        format!("{}... [truncated]", &banner[..200])
-                    } else {
-                        banner.clone()
+                // Show key strength with color-coded evaluation
+                if let Some(bits) = cert.public_key_bits {
+                    let strength_style = if bits < 2048 { 
+                        style("weak").red() 
+                    } else if bits < 4096 { 
+                        style("acceptable").yellow() 
+                    } else { 
+                        style("strong").green() 
                     };
-                    println!("  Banner: {}", sanitize_string(&truncated));
-                }
-                
-                // Print certificate info
-                if let Some(cert) = &result.cert_info {
-                    println!("  SSL Certificate:");
-                    println!("    Subject: {}", cert.subject);
-                    println!("    Issuer: {}", cert.issuer);
-                    println!("    Valid: {} to {}", 
-                        cert.not_before,
-                        cert.not_after
+                    
+                    println!("    Key: {} {} bits ({})", 
+                        cert.key_algorithm.as_deref().unwrap_or("Unknown"),
+                        bits,
+                        strength_style
                     );
-                    
-                    // Check if cert is expired
-                    let now = Utc::now();
-                    // Parse datetime strings for comparison
-                    let not_before = chrono::DateTime::parse_from_rfc3339(&cert.not_before).ok();
-                    let not_after = chrono::DateTime::parse_from_rfc3339(&cert.not_after).ok();
-                    
-                    if let Some(not_before_time) = not_before {
-                        if now < not_before_time {
-                            println!("    {}", style("Certificate not yet valid!").red().bold());
-                        }
-                    }
-                    
-                    if let Some(not_after_time) = not_after {
-                        if now > not_after_time {
-                            println!("    {}", style("Certificate expired!").red().bold());
-                        }
-                    }
                 }
                 
-                // Print vulnerabilities
-                if !result.vulns.is_empty() {
-                    println!("  {}", style("Potential Vulnerabilities:").red().bold());
-                    for vuln in &result.vulns {
-                        println!("    - {}", vuln);
+                // Show alternative names
+                if !cert.alt_names.is_empty() {
+                    println!("    Alternative Names:");
+                    for name in cert.alt_names.iter().take(5) {
+                        println!("      - {}", name);
                     }
+                    
+                    if cert.alt_names.len() > 5 {
+                        println!("      ... and {} more", cert.alt_names.len() - 5);
+                    }
+                }
+            }
+            
+            // Print vulnerabilities with severity highlighting
+            if !result.vulns.is_empty() {
+                println!("  {}", style("Vulnerabilities").red().bold());
+                for vuln in &result.vulns {
+                    let vuln_style = if vuln.contains("Critical") { 
+                        style(vuln).red().bold()
+                    } else if vuln.contains("High") {
+                        style(vuln).red()
+                    } else if vuln.contains("Medium") {
+                        style(vuln).yellow()
+                    } else if vuln.contains("Low") {
+                        style(vuln).green()
+                    } else {
+                        style(vuln).white()
+                    };
+                    println!("    - {}", vuln_style);
                 }
             }
         }
     }
     
+    // Add scan statistics at the end
+    println!("\n{}", style("SCAN STATISTICS:").cyan().bold());
+    println!("  Packets sent: {}", results.packets_sent);
+    println!("  Successful operations: {}", results.successful_scans);
+    
+    if results.packets_sent > 0 {
+        let success_rate = (results.successful_scans as f64 / results.packets_sent as f64) * 100.0;
+        let rate_style = if success_rate > 90.0 {
+            style(format!("{:.1}%", success_rate)).green()
+        } else if success_rate > 70.0 {
+            style(format!("{:.1}%", success_rate)).yellow()
+        } else {
+            style(format!("{:.1}%", success_rate)).red()
+        };
+        println!("  Success rate: {}", rate_style);
+    }
+    
+    // Print risk assessment if available
+    if let Some(risk) = &results.risk_assessment {
+        println!("  {}: {}", style("Risk Assessment").yellow(), risk);
+    }
+    
+    // Print OS detection summary if available
+    if let Some(os) = &results.os_summary {
+        println!("  {}: {}", style("OS Detection").yellow(), os);
+    }
+
     Ok(())
 }
 
-/// Format a time duration as a human-readable string
+#[allow(dead_code)]
 fn format_duration(seconds: f64) -> String {
     if seconds < 0.001 {
         format!("{:.2} μs", seconds * 1_000_000.0)
@@ -404,7 +594,7 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-/// Print open ports to the console
+#[allow(dead_code)]
 pub fn print_open_ports(results: &ScanResults) -> Result<()> {
     println!("{}", style("OPEN PORTS:").cyan().bold());
     println!("{}", style("PORT      STATE   SERVICE").cyan());
@@ -432,7 +622,7 @@ pub fn print_open_ports(results: &ScanResults) -> Result<()> {
     Ok(())
 }
 
-/// Print detailed port information to the console
+#[allow(dead_code)]
 pub fn print_port_details(results: &ScanResults, port: u16) -> Result<()> {
     if let Some(result) = results.results.get(&port) {
         println!("{} {}", style("PORT DETAILS:").cyan().bold(), style(port).cyan());
@@ -493,19 +683,10 @@ pub fn print_port_details(results: &ScanResults, port: u16) -> Result<()> {
 
 /// Sanitize banner string for display
 fn sanitize_banner(banner: &str) -> String {
-    // Replace control characters with visible representations
-    banner.chars()
-        .map(|c| {
-            if c.is_ascii_control() && c != '\n' && c != '\r' && c != '\t' {
-                format!("\\x{:02x}", c as u8)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
+    sanitize_string(banner)
 }
 
-/// Export results to CSV format
+#[allow(dead_code)]
 pub fn export_to_csv(results: &ScanResults, writer: &mut dyn Write) -> Result<()> {
     // Write CSV header
     writeln!(writer, "port,state,service,version,banner")?;

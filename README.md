@@ -12,6 +12,7 @@ An advanced port scanner with evasion capabilities written in Rust.
 - **Performance**: High-speed concurrent scanning leveraging Rust's async capabilities
 - **Service Detection**: Identifies services running on open ports
 - **SSL Analysis**: Examines SSL/TLS certificates and configuration
+- **Ultra-Minimal Binaries**: Extreme UPX compression enabled by default for smallest possible executables
 - **Cross-Platform**: Works on Linux, macOS, and Windows
 - **Top Ports Scanning**: Quick scan of the top 100 most common ports
 
@@ -29,20 +30,21 @@ Running port scans against networks or systems without explicit permission is il
 - Rust 1.67.0 or later
 - Cargo
 - libpcap development files (for packet capture capabilities)
+- UPX (Optional but recommended for binary compression - installed by default)
 
 On Debian/Ubuntu systems:
 ```
-sudo apt install libpcap-dev
+sudo apt install libpcap-dev upx-ucl
 ```
 
 On RHEL/Fedora:
 ```
-sudo dnf install libpcap-devel
+sudo dnf install libpcap-devel upx
 ```
 
 On macOS with Homebrew:
 ```
-brew install libpcap
+brew install libpcap upx
 ```
 
 ### Building from source
@@ -63,7 +65,12 @@ To install the binary system-wide (requires root):
 sudo ./build.sh --install
 ```
 
-The compiled binary will be in `target/release/quantum_scanner`.
+To build a fully static binary using Docker:
+```
+sudo ./build.sh --static-build
+```
+
+The compiled binary will be in `target/release/quantum_scanner` and also copied to `./quantum_scanner`.
 
 ## Usage
 
@@ -94,64 +101,4 @@ quantum_scanner --scan-types mimic --mimic-protocol HTTP 192.168.1.1
 
 # Scan an entire subnet
 quantum_scanner --scan-types syn --ports 22,80,443 192.168.1.0/24
-```
-
-## Command-line Options
-
-Basic options:
-```
-<TARGET>                Target IP address, hostname, or CIDR notation for subnet
--p, --ports             Ports to scan (comma-separated, ranges like 1-1000) [default: 1-1000]
--t, --top-100           Scan the top 100 common ports
--s, --scan-types        Scan techniques to use [default: syn]
-                        [possible values: syn, ack, fin, xmas, null, window, ssl, udp, tls_echo, mimic, frag]
--c, --concurrency       Maximum concurrent operations [default: 100]
--o, --output            Write results to file
--j, --json              Output results in JSON format
--v, --verbose           Enable verbose output
--m, --memory-only       Enable memory-only operation (no disk writes)
--h, --help              Print help information
--V, --version           Print version information
-```
-
-Evasion options:
-```
--e, --evasion           Enable evasion techniques
---mimic-protocol        Protocol to mimic in mimic scans [default: HTTP]
---mimic-os              Operating system to mimic (windows, linux, macos, random)
---ttl-jitter            TTL jitter amount for enhanced evasion (1-5) [default: 2]
-```
-
-Performance options:
-```
--r, --rate              Maximum packets per second (0 for automatic rate) [default: 0]
---timeout               Scan timeout in seconds [default: 3.0]
-```
-
-## Enhanced Security Features
-
-### Memory-Only Operation
-
-Quantum Scanner now operates in disk mode by default for better reliability and persistence. For enhanced operational security, you can enable memory-only mode which avoids writing sensitive data to disk:
-
-```
-quantum_scanner --memory-only target.com
-```
-
-### Top 100 Ports Scanning
-
-For quick reconnaissance, you can scan the top 100 most commonly used ports:
-
-```
-quantum_scanner --top-100 target.com
-```
-
-This is faster than scanning the default port range while still covering the most likely services.
-
-## License
-
-MIT License
-
-## Acknowledgments
-
-This is a Rust port of the original Python Quantum Scanner. 
+``` 

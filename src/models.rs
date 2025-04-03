@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::net::IpAddr;
 use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
@@ -117,6 +116,27 @@ pub struct PortResult {
     pub banner: Option<String>,
     pub os_guess: Option<String>,
     pub scan_time: DateTime<Utc>,
+    /// Security assessment of the service configuration
+    /// 
+    /// Contains analysis of the security posture of the service, including
+    /// whether it's using secure defaults, has known misconfigurations,
+    /// or follows best practices for the specific service type.
+    pub security_posture: Option<String>,
+    /// List of detected anomalies in responses
+    ///
+    /// Tracks potential honeypots, unusual response patterns, or 
+    /// indicators of security devices or deception technologies
+    pub anomalies: Vec<String>,
+    /// Response timing analysis
+    ///
+    /// Contains timing information that might indicate network filtering,
+    /// virtualization, or intentional delays
+    pub timing_analysis: Option<String>,
+    /// Detailed service information beyond basic version
+    ///
+    /// Contains extended details about the service such as specific
+    /// configurations, enabled features, or operational modes
+    pub service_details: Option<HashMap<String, String>>,
 }
 
 impl Default for PortResult {
@@ -132,6 +152,10 @@ impl Default for PortResult {
             banner: None,
             os_guess: None,
             scan_time: Utc::now(),
+            security_posture: None,
+            anomalies: Vec::new(),
+            timing_analysis: None,
+            service_details: None,
         }
     }
 }
@@ -140,20 +164,50 @@ impl Default for PortResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResults {
     pub target: String,
-    pub target_ip: IpAddr,
+    pub target_ip: String,
     pub open_ports: HashSet<u16>,
     pub results: HashMap<u16, PortResult>,
     pub start_time: DateTime<Utc>,
     pub end_time: DateTime<Utc>,
     pub scan_types: Vec<ScanType>,
+    /// Total packets sent during the scan
+    ///
+    /// This counter tracks all packet transmissions, including retries
+    /// and multi-packet scan techniques
+    pub packets_sent: usize,
+    /// Number of successful scan operations
+    ///
+    /// Tracks the number of scan operations that completed successfully,
+    /// which can be compared with packets_sent to calculate success rate
+    pub successful_scans: usize,
+    /// Summary of detected operating systems across all ports
+    ///
+    /// Consolidates OS detection from individual port scans into an
+    /// overall assessment of the target system
+    pub os_summary: Option<String>,
+    /// Overall security risk assessment
+    ///
+    /// Provides a high-level risk score based on open ports,
+    /// detected services, and identified vulnerabilities
+    pub risk_assessment: Option<String>,
+    /// Categories of services detected
+    ///
+    /// Groups detected services into categories like "web", "database",
+    /// "remote access", etc. for easier analysis
+    pub service_categories: Option<HashMap<String, Vec<u16>>>,
 }
 
 /// Error types for port range parsing
 #[derive(Error, Debug)]
 pub enum PortRangeError {
+    #[allow(dead_code)]
+    #[error("Invalid format: {0}")]
+    InvalidFormat(String),
+    
     #[error("Invalid port number: {0}")]
     InvalidPort(String),
     
+    #[allow(dead_code)]
     #[error("Invalid port range: {0}")]
     InvalidRange(String),
     
@@ -378,10 +432,41 @@ impl TopPorts {
         ]
     }
     
-    /// Get the top 10 most common ports to scan
+    #[allow(dead_code)]
     pub fn top_10() -> Vec<u16> {
         vec![80, 443, 22, 21, 25, 3389, 110, 445, 139, 143]
     }
+}
+
+/// HTTP security header type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HttpSecurityHeader {
+    ContentSecurityPolicy(String),
+    XContentTypeOptions(String),
+    XFrameOptions(String),
+    XXssProtection(String),
+    StrictTransportSecurity(String),
+    ReferrerPolicy(String),
+    FeaturePolicy(String),
+    Other(String, String),
+}
+
+/// HTTP response information
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HttpInfo {
+    pub http_version: Option<String>,
+    pub status_code: Option<u16>,
+    pub status_text: Option<String>,
+    pub headers: HashMap<String, String>,
+    pub content_type: Option<String>,
+    pub response_size: Option<usize>,
+    pub response_time: Option<f64>,
+    pub title: Option<String>,
+    pub cookies: Vec<String>,
+    pub redirects: Vec<String>,
+    pub security_headers: Vec<HttpSecurityHeader>,
+    pub technologies: Vec<String>,
+    pub server: Option<String>,
 }
 
 /// Common service port mappings

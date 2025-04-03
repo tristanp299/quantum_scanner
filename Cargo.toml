@@ -30,6 +30,9 @@ x509-parser = { version = "0.15.0", optional = true }
 # Cryptography
 sha2 = "0.10.6"
 aes-gcm = "0.10.2"
+argon2 = { version = "0.5.0", optional = true }
+zeroize = { version = "1.6.0", optional = true }
+chacha20poly1305 = { version = "0.10.1", optional = true }
 
 # Terminal UI
 indicatif = "0.17.3"
@@ -42,6 +45,9 @@ colored = "2.0.0"
 tempfile = "3.5.0"
 # Need to enable these features for secure random and password generation
 rand = { version = "0.8.5", features = ["std", "std_rng"] }
+
+# String processing
+regex = "1.5.4"
 
 # Utility
 clap = { version = "4.2.7", features = ["derive"] }
@@ -70,3 +76,5 @@ cidr-utils = "0.5.10"
 default = ["full"]
 full = ["x509-parser"]
 minimal-static = []
+secure-memory = ["zeroize"]
+enhanced-crypto = ["argon2", "chacha20poly1305"]

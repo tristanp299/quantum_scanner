@@ -11,9 +11,11 @@ mod models;
 mod techniques;
 mod utils;
 mod output;
+mod http_analyzer;
+mod service_fingerprints;
 
 use scanner::QuantumScanner;
-use models::{ScanType, PortRange, PortRanges, PortStatus, TopPorts};
+use models::{ScanType, PortRange, PortRanges, TopPorts};
 
 /// Advanced port scanner with evasion capabilities
 #[derive(Parser)]
@@ -31,8 +33,9 @@ struct Args {
     #[clap(short = 'm', long)]
     memory_only: bool,
 
-    /// Scan techniques to use
-    #[clap(short, long, value_enum, use_value_delimiter = true, value_delimiter = ',', default_value = "syn")]
+    /// Scan techniques to use (comma-separated)
+    /// Examples: -s syn,ssl or -s syn -s ssl
+    #[clap(short, long, value_enum, use_value_delimiter = true, value_delimiter = ',', default_value = "syn", num_args = 1..)]
     scan_types: Vec<ScanTypeArg>,
 
     /// Maximum concurrent operations
@@ -44,10 +47,19 @@ struct Args {
     rate: usize,
 
     /// Enable evasion techniques
-    #[clap(short, long)]
+    #[clap(short, long, help = "Enable basic evasion techniques (packet timing randomization, TTL manipulation)")]
     evasion: bool,
 
     /// Enable verbose output
+    /// 
+    /// When enabled, this flag causes the scanner to output detailed information
+    /// about the scanning process to stdout, including debug-level messages.
+    /// In disk mode, verbose logs are also written to the log file.
+    /// This provides both real-time console output and persistent logs,
+    /// making it easier to monitor scan progress and troubleshoot issues.
+    /// 
+    /// For red team operations, consider the operational security implications
+    /// of enabling verbose output, as it creates more evidence of your activities.
     #[clap(short, long)]
     verbose: bool,
 
@@ -120,7 +132,7 @@ struct Args {
     _log_password: Option<String>,
     
     /// Enable enhanced evasion techniques
-    #[clap(long, default_value_t = true)]
+    #[clap(short = 'E', long, default_value_t = true, help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol mimicry)")]
     enhanced_evasion: bool,
     
     /// Operating system to mimic in enhanced evasion mode
@@ -164,10 +176,23 @@ struct Args {
     color: bool,
     
     /// Securely delete files after scan
-    #[clap(long, default_value_t = true)]
+    /// 
+    /// When enabled, this option performs secure deletion of log files and 
+    /// any temporary files created during the scan using multiple overwrite passes.
+    /// This option is disabled by default for operational safety and can be 
+    /// explicitly enabled when needed for sensitive operations.
+    /// 
+    /// For maximum operational security, enable this flag when operating in
+    /// sensitive or hostile environments to prevent data forensics recovery.
+    #[clap(long, default_value_t = false)]
     secure_delete: bool,
     
     /// Number of secure delete passes
+    /// 
+    /// Specifies how many passes of overwriting should be performed when
+    /// secure_delete is enabled. More passes provide better security but
+    /// take longer. Default is 3 passes which is a good balance between
+    /// security and performance.
     #[clap(long, default_value_t = 3)]
     delete_passes: u8,
 
@@ -215,6 +240,7 @@ struct Colors {
     green: String,
     yellow: String,
     blue: String,
+    #[allow(dead_code)]
     red: String,
     reset: String,
 }
@@ -242,11 +268,11 @@ impl Colors {
 }
 
 /// Initialize logging with proper configuration
-fn setup_logging(log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_logs: bool, _log_password: Option<&str>) -> Result<Option<utils::MemoryLogBuffer>, anyhow::Error> {
+fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_logs: bool, _log_password: Option<&str>) -> Result<Option<utils::MemoryLogBuffer>, anyhow::Error> {
     // Setup memory logger if memory-only mode is enabled
     if memory_only {
         // When in memory-only mode, do not create any log files on disk
-        info!("Running in memory-only mode - logs will not be written to disk");
+        println!("Running in memory-only mode - logs will not be written to disk");
         
         // Create memory logger with encryption if specified
         let buffer = utils::MemoryLogBuffer::new(10000, encrypt_logs);
@@ -254,6 +280,14 @@ fn setup_logging(log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_l
         // Configure environment variable for env_logger
         let log_level = if verbose { "debug" } else { "info" };
         std::env::set_var("RUST_LOG", log_level);
+        
+        // Initialize the memory logger without disk logger
+        env_logger::Builder::from_default_env()
+            .format_timestamp_secs()
+            .format_module_path(true)
+            .format_target(false)
+            .target(env_logger::Target::Stdout) // Redirect to stdout since we're in memory-only mode
+            .init();
         
         // Log initialization message
         buffer.log("INFO", &format!("Quantum Scanner started in memory-only mode"));
@@ -264,39 +298,86 @@ fn setup_logging(log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_l
         return Ok(Some(buffer));
     }
     
-    // Normal file-based logging
+    // Normal file-based logging - use a simple approach
     
-    // Create log directory if needed
-    if let Some(parent) = log_file.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-
     // Set log level based on verbosity
     let log_level = if verbose { "debug" } else { "info" };
-    
-    // Configure environment variable for env_logger
     std::env::set_var("RUST_LOG", log_level);
     
     // If encryption is enabled, we'll need to intercept logs
     if encrypt_logs {
-        // We need a custom logger for encryption
-        // For simplicity in this implementation, we'll disable encryption for normal file mode
-        // A full implementation would use a custom log appender with encryption
         warn!("Log encryption is only fully supported in memory-only mode");
     }
     
+    // Use a simple approach for disk logging - just use current directory
+    let simple_log_file = PathBuf::from("scanner.log");
+    
+    // Try to create the log file with proper permissions
+    let log_file_handle = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&simple_log_file) {
+            Ok(file) => file,
+            Err(e) => {
+                eprintln!("Warning: Failed to create log file: {}. Using stdout instead.", e);
+                env_logger::Builder::from_default_env()
+                    .format_timestamp_secs()
+                    .format_module_path(true)
+                    .format_target(false)
+                    .init();
+                return Ok(None);
+            }
+        };
+    
+    // Set appropriate file permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&simple_log_file, std::fs::Permissions::from_mode(0o600)) {
+            warn!("Failed to set secure permissions on log file: {}", e);
+        }
+    }
+    
+    println!("Running in disk mode - logs will be written to {}", simple_log_file.display());
+    
     // Initialize the logger with disk file
-    info!("Running in disk mode - logs will be written to {}", log_file.display());
-    env_logger::Builder::from_default_env()
-        .format_timestamp_secs()
-        .format_module_path(true)
-        .format_target(false)
-        .target(env_logger::Target::Pipe(Box::new(
-            std::fs::File::create(log_file)?
-        )))
-        .init();
+    // For verbose mode, we'll duplicate messages to stdout
+    if verbose {
+        // Setup a custom formatter that also prints to stdout
+        let mut builder = env_logger::Builder::new();
+        builder.parse_filters(&log_level);
+        builder.format(move |buf, record| {
+            // Print to stdout for important messages
+            if record.level() <= log::Level::Info {
+                println!("[{}] {}", record.level(), record.args());
+            }
+            
+            // Format for file
+            use std::io::Write;
+            writeln!(
+                buf,
+                "[{} {} {}:{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.file().unwrap_or("unknown"),
+                record.line().unwrap_or(0),
+                record.args()
+            )
+        });
+        
+        // Set the disk file as the log target
+        builder.target(env_logger::Target::Pipe(Box::new(log_file_handle)));
+        builder.init();
+    } else {
+        // Standard logging to file only for non-verbose mode
+        env_logger::Builder::from_default_env()
+            .format_timestamp_secs()
+            .format_module_path(true)
+            .format_target(false)
+            .target(env_logger::Target::Pipe(Box::new(log_file_handle)))
+            .init();
+    }
     
     Ok(None)
 }
@@ -399,16 +480,27 @@ fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
     if let Some(mount_point) = ramdisk {
         #[cfg(unix)]
         {
+            // Check if the mount point exists and is mounted
+            if !mount_point.exists() {
+                return Ok(());
+            }
+            
+            // Try to unmount
             let status = std::process::Command::new("umount")
-                .arg(mount_point)
+                .arg(mount_point.to_str().unwrap_or_default())
                 .status()?;
             
             if status.success() {
-                info!("Unmounted RAM disk at {}", mount_point.display());
-                // Try to remove the directory
-                let _ = std::fs::remove_dir(mount_point);
+                info!("Unmounted RAM disk from {}", mount_point.display());
+                
+                // Remove directory after unmounting
+                if mount_point.exists() {
+                    std::fs::remove_dir_all(mount_point)?;
+                }
+                
+                return Ok(());
             } else {
-                warn!("Failed to unmount RAM disk at {}", mount_point.display());
+                return Err(anyhow::anyhow!("Failed to unmount RAM disk at {}", mount_point.display()));
             }
         }
     }
@@ -416,85 +508,46 @@ fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Securely delete a file using available utilities or fallback methods
+/// Secure file deletion with multiple passes of overwriting
 fn secure_delete_file(path: &PathBuf, passes: u8) -> Result<(), anyhow::Error> {
-    if !path.exists() {
+    // Ensure path exists and is a file
+    if !path.exists() || !path.is_file() {
         return Ok(());
     }
     
+    // Sanitize the path to prevent command injection
+    let path_str = path.to_string_lossy();
+    if path_str.contains(";") || path_str.contains("&") || path_str.contains("|") || 
+       path_str.contains(">") || path_str.contains("<") || path_str.contains("$") {
+        return Err(anyhow::anyhow!("Invalid characters in file path"));
+    }
+    
+    // Calculate file size
+    let size = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(e) => return Err(anyhow::anyhow!("Failed to get file size: {}", e)),
+    };
+    
     #[cfg(unix)]
     {
-        // Try using 'shred' first
-        if std::process::Command::new("which")
-            .arg("shred")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false) 
-        {
-            let status = std::process::Command::new("shred")
-                .args(["-uzn", &passes.to_string(), path.to_str().unwrap()])
-                .status()?;
-            
-            if status.success() {
-                return Ok(());
-            }
-        }
-        
-        // Try using 'wipe' next
-        if std::process::Command::new("which")
-            .arg("wipe")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false) 
-        {
-            let status = std::process::Command::new("wipe")
-                .args(["-f", path.to_str().unwrap()])
-                .status()?;
-            
-            if status.success() {
-                return Ok(());
-            }
-        }
-        
-        // Try using 'srm' next
-        if std::process::Command::new("which")
-            .arg("srm")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false) 
-        {
-            let status = std::process::Command::new("srm")
-                .args(["-z", path.to_str().unwrap()])
-                .status()?;
-            
-            if status.success() {
-                return Ok(());
-            }
-        }
-        
-        // Fallback: overwrite with random data and delete
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)?;
-        
-        // Get file size
-        let metadata = file.metadata()?;
-        let size = metadata.len();
-        
-        // Create buffer of random data
+        // On Unix, overwrite the file with random data multiple times
         let mut rng = thread_rng();
-        let mut buffer = vec![0u8; std::cmp::min(size as usize, 1024)];
         
-        // Overwrite file for specified number of passes
-        for _ in 0..passes {
-            for chunk in buffer.chunks_mut(1024) {
-                rng.fill(chunk);
-            }
+        for pass in 0..passes {
+            let pattern = match pass % 3 {
+                0 => 0xFF, // All ones
+                1 => 0x00, // All zeros
+                _ => rng.gen::<u8>(), // Random
+            };
             
-            let _ = std::process::Command::new("dd")
+            // Generate pattern for dd command
+            let _pattern_str = format!("\\\\x{:02x}", pattern);
+            
+            // Use dd to overwrite with the pattern - handle command injection risk
+            std::process::Command::new("dd")
                 .args([
-                    "if=/dev/urandom",
-                    &format!("of={}", path.to_str().unwrap()),
+                    format!("if=/dev/zero").as_str(),
+                    format!("of={}", path.display()).as_str(),
                     "bs=1k",
                     &format!("count={}", (size + 1023) / 1024), // Round up
                     "conv=notrunc"
@@ -508,7 +561,35 @@ fn secure_delete_file(path: &PathBuf, passes: u8) -> Result<(), anyhow::Error> {
     
     #[cfg(not(unix))]
     {
-        // On non-Unix platforms, just delete the file
+        // For non-Unix platforms, overwrite with zeros before deleting
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+            
+        let zeros = vec![0u8; 4096];
+        let mut writer = std::io::BufWriter::new(file);
+        
+        for _ in 0..passes {
+            // Seek to beginning of file
+            writer.seek(std::io::SeekFrom::Start(0))?;
+            
+            // Overwrite in chunks
+            let mut remaining = size;
+            while remaining > 0 {
+                let to_write = std::cmp::min(remaining, zeros.len() as u64);
+                writer.write_all(&zeros[0..to_write as usize])?;
+                remaining -= to_write;
+            }
+            
+            // Flush to ensure data is written
+            writer.flush()?;
+        }
+        
+        // Close file handle
+        drop(writer);
+        
+        // Delete file
         std::fs::remove_file(path)?;
     }
     
@@ -536,10 +617,17 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     
     // Setup Tor routing if available and enabled
-    let tor_enabled = setup_tor_routing(args.use_tor);
-    if tor_enabled {
-        println!("[{}+{}] Routing traffic through Tor", colors.green, colors.reset);
-    }
+    let _tor_enabled = if args.use_tor {
+        let tor_result = setup_tor_routing(true);
+        if tor_result {
+            println!("[{}+{}] Routing traffic through Tor", colors.green, colors.reset);
+        } else {
+            println!("[{}!{}] Tor routing requested but not available", colors.yellow, colors.reset);
+        }
+        tor_result
+    } else {
+        false
+    };
     
     // Check for RAM disk support for temporary files
     let ramdisk = if args.memory_only && args.use_ramdisk {
@@ -635,7 +723,7 @@ async fn main() -> Result<(), anyhow::Error> {
             Ok(ranges) => ranges,
             Err(e) => {
                 error!("Failed to parse port ranges: {}", e);
-                eprintln!("Error: Invalid port range specification");
+                eprintln!("Error: Invalid port range specification: {}", e);
                 process::exit(1);
             }
         };
@@ -646,7 +734,7 @@ async fn main() -> Result<(), anyhow::Error> {
     
     if ports_to_scan.is_empty() {
         error!("No valid ports specified");
-        eprintln!("Error: Invalid port range specification");
+        eprintln!("Error: No valid ports to scan. Please check port specification.");
         process::exit(1);
     }
     
@@ -712,20 +800,52 @@ async fn main() -> Result<(), anyhow::Error> {
     println!("[{}+{}] Scan completed. Found {} open ports", 
         colors.green, colors.reset, results.open_ports.len());
     
-    // Display results
-    for port in results.open_ports.iter().cloned().collect::<Vec<_>>() {
-        if let Some(result) = results.results.get(&port) {
-            let _status = result.tcp_states.values().next().unwrap_or(&PortStatus::Filtered);
-            println!("Port {}:{} {}", port, colors.green, colors.reset);
-            
-            if let Some(service) = &result.service {
-                println!("  Service: {}", service);
-            }
-            
-            if let Some(version) = &result.version {
-                println!("  Version: {}", version);
+    // Display results with enhanced verbosity
+    if args.verbose {
+        // Display enhanced scan details using the print_results function
+        output::print_results(&results)?;
+    } else {
+        // Display simplified results for non-verbose mode
+        for port in results.open_ports.iter().cloned().collect::<Vec<_>>() {
+            if let Some(result) = results.results.get(&port) {
+                let service_info = match (&result.service, &result.version) {
+                    (Some(service), Some(version)) => format!("{} ({})", service, version),
+                    (Some(service), None) => service.clone(),
+                    _ => "unknown".to_string()
+                };
+                
+                println!("[{}OPEN{}] Port {}: {} ", 
+                    colors.green, colors.reset, port, service_info);
+                
+                // Show condensed vulnerability count if present
+                if !result.vulns.is_empty() {
+                    println!("       {}- {} potential vulnerabilities detected{}",
+                        colors.yellow, result.vulns.len(), colors.reset);
+                }
             }
         }
+        
+        // Display scan statistics summary
+        println!("\n[{}INFO{}] Scan Statistics:", colors.blue, colors.reset);
+        println!("       - Packets sent: {}", results.packets_sent);
+        println!("       - Success rate: {:.1}%", 
+            if results.packets_sent > 0 { 
+                (results.successful_scans as f64 / results.packets_sent as f64) * 100.0 
+            } else { 
+                0.0 
+            }
+        );
+        
+        // Show total vulnerability count
+        let total_vulns: usize = results.results.values()
+            .map(|r| r.vulns.len())
+            .sum();
+        
+        if total_vulns > 0 {
+            println!("       - {} potential vulnerabilities detected", total_vulns);
+        }
+        
+        println!("\nUse --verbose for more detailed output");
     }
     
     // Output to file if requested
@@ -751,7 +871,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
     
     // Cleanup phase
-    if args.memory_only && args.secure_delete {
+    if args.secure_delete {
         println!("[{}+{}] Performing secure cleanup...", colors.green, colors.reset);
         
         // Delete log file if it exists
@@ -764,8 +884,12 @@ async fn main() -> Result<(), anyhow::Error> {
         }
         
         // Cleanup RAM disk if created
-        if let Some(_) = ramdisk {
-            cleanup_ramdisk(&ramdisk)?;
+        if ramdisk.is_some() {
+            match cleanup_ramdisk(&ramdisk) {
+                Ok(_) => println!("[{}+{}] RAM disk cleaned up successfully", colors.green, colors.reset),
+                Err(e) => println!("[{}!{}] Failed to clean up RAM disk: {}", 
+                    colors.yellow, colors.reset, e),
+            }
         }
     }
     

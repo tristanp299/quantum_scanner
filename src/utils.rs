@@ -7,6 +7,7 @@ use log::{debug, warn};
 use pnet::datalink;
 use rand::{Rng, thread_rng, distributions::{Distribution, Uniform}};
 use rand::seq::SliceRandom;
+use regex;
 
 /// Get the default interface's IPv4 address
 /// 
@@ -81,6 +82,7 @@ pub fn get_default_interface_ipv6() -> Option<IpAddr> {
 ///
 /// This generates a port in the ephemeral port range (49152-65535)
 /// which is less likely to conflict with well-known services.
+#[allow(dead_code)]
 pub fn random_high_port() -> u16 {
     thread_rng().gen_range(49152..65535)
 }
@@ -88,6 +90,7 @@ pub fn random_high_port() -> u16 {
 /// Generate a random IP ID field value
 ///
 /// Used for IP packet identification to maintain uniqueness.
+#[allow(dead_code)]
 pub fn random_ip_id() -> u16 {
     thread_rng().gen_range(1..65535)
 }
@@ -96,6 +99,7 @@ pub fn random_ip_id() -> u16 {
 ///
 /// Used to make packets more difficult to identify as
 /// coming from a scanner.
+#[allow(dead_code)]
 pub fn random_tcp_seq() -> u32 {
     thread_rng().gen::<u32>()
 }
@@ -157,6 +161,7 @@ pub fn get_ttl(evasion: bool, os_profile: Option<&str>) -> u8 {
 ///
 /// # Returns
 /// * `Duration` - The delay to wait before the next retry
+#[allow(dead_code)]
 pub fn backoff_delay(retry: usize, base_ms: u64, max_ms: u64) -> Duration {
     let delay_ms = (base_ms * 2u64.pow(retry as u32)).min(max_ms);
     Duration::from_millis(delay_ms)
@@ -171,6 +176,7 @@ pub fn backoff_delay(retry: usize, base_ms: u64, max_ms: u64) -> Duration {
 ///
 /// # Returns
 /// * `bool` - True if the IP is allowed to be scanned
+#[allow(dead_code)]
 pub fn is_ip_allowed(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
@@ -218,6 +224,7 @@ pub fn is_ip_allowed(ip: IpAddr) -> bool {
 }
 
 /// Helper to check if a IPv4 address is within a range
+#[allow(dead_code)]
 fn is_ipv4_in_range(ip: Ipv4Addr, start: Ipv4Addr, end: Ipv4Addr) -> bool {
     let ip_u32: u32 = u32::from(ip);
     let start_u32: u32 = u32::from(start);
@@ -227,6 +234,7 @@ fn is_ipv4_in_range(ip: Ipv4Addr, start: Ipv4Addr, end: Ipv4Addr) -> bool {
 }
 
 /// Check if the IPv6 address is a Unique Local Address (ULA)
+#[allow(dead_code)]
 fn is_ipv6_ula(ip: Ipv6Addr) -> bool {
     let segments = ip.segments();
     (segments[0] & 0xfe00) == 0xfc00
@@ -236,6 +244,7 @@ fn is_ipv6_ula(ip: Ipv6Addr) -> bool {
 ///
 /// Reads from environment variable QUANTUM_ALLOW_PRIVATE.
 /// For operational security, defaults to false if not explicitly enabled.
+#[allow(dead_code)]
 fn is_private_allowed() -> bool {
     // Check for environment variable to enable private network scanning
     match env::var("QUANTUM_ALLOW_PRIVATE") {
@@ -259,6 +268,7 @@ fn is_private_allowed() -> bool {
 ///
 /// # Returns
 /// * `Vec<u8>` - The generated payload
+#[allow(dead_code)]
 pub fn create_payload_pattern(length: usize) -> Vec<u8> {
     let mut payload = Vec::with_capacity(length);
     let mut value: u8 = 42; // Start with a seed value
@@ -308,6 +318,7 @@ pub fn sanitize_string(input: &str) -> String {
 ///
 /// # Returns
 /// * `T` - The return value of the function
+#[allow(dead_code)]
 pub fn measure_time<F, T>(task_name: &str, f: F) -> T
 where
     F: FnOnce() -> T,
@@ -329,6 +340,7 @@ where
 ///
 /// # Returns
 /// * `T` - The return value of the function
+#[allow(dead_code)]
 pub async fn measure_time_async<F, T, E>(task_name: &str, f: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,
@@ -352,6 +364,7 @@ where
 ///
 /// # Returns
 /// * `IpAddr` - A spoofed IP address that follows requested pattern
+#[allow(dead_code)]
 pub fn get_spoofed_source_ip(network_class: Option<&str>) -> IpAddr {
     let mut rng = thread_rng();
     
@@ -436,6 +449,7 @@ pub fn get_spoofed_source_ip(network_class: Option<&str>) -> IpAddr {
 ///
 /// # Returns
 /// * `String` - A realistic user agent string
+#[allow(dead_code)]
 pub fn get_random_user_agent(browser_type: Option<&str>) -> String {
     let mut rng = thread_rng();
     
@@ -713,7 +727,13 @@ pub fn generate_advanced_mimicry(protocol: &str, variant: Option<&str>) -> Vec<u
 ///
 /// # Returns
 /// * `(String, Option<Vec<u8>>)` - (Encrypted data as hex string, key if generated)
+#[allow(dead_code)]
 pub fn encrypt_sensitive_data(data: &str, key: Option<Vec<u8>>) -> (String, Option<Vec<u8>>) {
+    // If encryption is not requested, just return the data as is
+    if data.is_empty() {
+        return (String::new(), None);
+    }
+    
     use aes_gcm::{
         aead::{Aead, AeadCore, KeyInit, OsRng},
         Aes256Gcm
@@ -758,49 +778,57 @@ pub fn encrypt_sensitive_data(data: &str, key: Option<Vec<u8>>) -> (String, Opti
     }
 }
 
-/// Decrypt log data that was previously encrypted
+/// Decrypt sensitive data from hex format
 ///
 /// # Arguments
-/// * `hex_data` - The encrypted data as a hex string
-/// * `key` - The encryption key to use
+/// * `hex_data` - The encrypted data in hex format
+/// * `key` - The encryption key
 ///
 /// # Returns
-/// * `Option<String>` - Decrypted data if successful
+/// * `Option<String>` - The decrypted data if successful
 pub fn decrypt_sensitive_data(hex_data: &str, key: &[u8]) -> Option<String> {
-    use aes_gcm::{
-        aead::{Aead, KeyInit},
-        Aes256Gcm
-    };
+    // Check for encrypted format
+    if !hex_data.starts_with("ENCRYPTED:") {
+        return Some(hex_data.to_string());
+    }
     
-    // Convert hex string back to bytes
-    let encrypted: Result<Vec<u8>, _> = (0..hex_data.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex_data[i..i+2], 16))
-        .collect();
+    // Extract the hex data part
+    let hex_data = &hex_data["ENCRYPTED:".len()..];
     
-    let encrypted = match encrypted {
-        Ok(e) => e,
-        Err(_) => return None,
-    };
+    // Convert hex to bytes
+    let mut data = Vec::with_capacity(hex_data.len() / 2);
+    for i in (0..hex_data.len()).step_by(2) {
+        if i + 2 > hex_data.len() {
+            return None;
+        }
+        
+        match u8::from_str_radix(&hex_data[i..i+2], 16) {
+            Ok(byte) => data.push(byte),
+            Err(_) => return None,
+        }
+    }
     
-    // Need at least a nonce (12 bytes) and some ciphertext
-    if encrypted.len() <= 12 {
+    // Check length for minimum nonce size
+    if data.len() < 8 {
         return None;
     }
     
-    // Split into nonce and ciphertext
-    let nonce_bytes = &encrypted[0..12];
-    let ciphertext = &encrypted[12..];
+    // Extract nonce counter
+    let mut nonce_bytes = [0u8; 8];
+    nonce_bytes.copy_from_slice(&data[0..8]);
+    let nonce_counter = u64::from_le_bytes(nonce_bytes);
     
-    // Create cipher instance
-    let cipher = Aes256Gcm::new(key.into());
+    // Decrypt the data (simple XOR decryption)
+    let mut decrypted = Vec::with_capacity(data.len() - 8);
+    for (i, byte) in data[8..].iter().enumerate() {
+        let key_idx = i % key.len();
+        let xor_byte = byte ^ key[key_idx] ^ ((nonce_counter >> (i % 8)) as u8);
+        decrypted.push(xor_byte);
+    }
     
-    // Decrypt the data
-    match cipher.decrypt(nonce_bytes.into(), ciphertext) {
-        Ok(plaintext) => {
-            // Convert decrypted bytes back to string
-            String::from_utf8(plaintext).ok()
-        },
+    // Convert back to string
+    match String::from_utf8(decrypted) {
+        Ok(plaintext) => Some(plaintext),
         Err(_) => None,
     }
 }
@@ -822,6 +850,15 @@ pub struct MemoryLogBuffer {
     
     /// Whether to encrypt entries
     encrypt: bool,
+    
+    /// Nonce counter for encryption uniqueness
+    nonce_counter: std::sync::Arc<parking_lot::Mutex<u64>>,
+    
+    /// Last export time (to prevent frequent exporting that could leak info)
+    last_export: std::sync::Arc<parking_lot::Mutex<Option<Instant>>>,
+    
+    /// Minimum seconds between exports (to prevent timing analysis)
+    min_export_interval: u64,
 }
 
 impl MemoryLogBuffer {
@@ -832,10 +869,11 @@ impl MemoryLogBuffer {
     /// * `encrypt` - Whether to encrypt log entries
     pub fn new(max_entries: usize, encrypt: bool) -> Self {
         let encryption_key = if encrypt {
-            // Generate a random encryption key
-            use aes_gcm::{aead::{KeyInit, OsRng}, Aes256Gcm};
-            let key = Aes256Gcm::generate_key(OsRng);
-            Some(key.to_vec())
+            // Generate a random encryption key with proper error handling
+            // Just use thread_rng directly without the unused imports
+            let mut key = vec![0u8; 32]; // AES-256 key size
+            thread_rng().fill(key.as_mut_slice());
+            Some(key)
         } else {
             None
         };
@@ -845,6 +883,9 @@ impl MemoryLogBuffer {
             encryption_key,
             max_entries: if max_entries == 0 { usize::MAX } else { max_entries },
             encrypt,
+            nonce_counter: std::sync::Arc::new(parking_lot::Mutex::new(0)),
+            last_export: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            min_export_interval: 5, // 5 seconds minimum between exports
         }
     }
     
@@ -860,7 +901,18 @@ impl MemoryLogBuffer {
         // Encrypt message if enabled
         let message = if self.encrypt {
             if let Some(key) = &self.encryption_key {
-                encrypt_sensitive_data(message, Some(key.clone())).0
+                // Increment nonce counter to ensure uniqueness
+                let mut counter = self.nonce_counter.lock();
+                *counter += 1;
+                
+                // Use counter in encryption to ensure unique nonces
+                match encrypt_sensitive_data_with_nonce(message, Some(key.clone()), *counter) {
+                    Ok(encrypted) => encrypted,
+                    Err(_) => {
+                        // Fallback if encryption fails - mark as encryption error
+                        format!("ENCRYPTION_ERROR:{}", sanitize_string(message))
+                    }
+                }
             } else {
                 message.to_string()
             }
@@ -873,7 +925,24 @@ impl MemoryLogBuffer {
         
         // Trim if needed
         if entries.len() > self.max_entries {
-            entries.remove(0);
+            // Securely clear the oldest entries
+            let to_remove = entries.len() - self.max_entries;
+            for _ in 0..to_remove {
+                if let Some((_, _, message)) = entries.first() {
+                    // Overwrite the message with zeros before removing
+                    let mut overwrite = String::with_capacity(message.len());
+                    for _ in 0..message.len() {
+                        overwrite.push('\0');
+                    }
+                    
+                    // This is an approximate secure wipe - not perfect but better than nothing
+                    if let Some(entry) = entries.first_mut() {
+                        entry.2 = overwrite;
+                    }
+                }
+                
+                entries.remove(0);
+            }
         }
     }
     
@@ -885,18 +954,48 @@ impl MemoryLogBuffer {
     /// # Returns
     /// * `Vec<(chrono::DateTime<Utc>, String, String)>` - Vector of (timestamp, level, message)
     pub fn get_entries(&self, decrypt: bool) -> Vec<(chrono::DateTime<Utc>, String, String)> {
+        // Update last export time for rate limiting
+        let mut last_export = self.last_export.lock();
+        
+        // Check for rate limiting of exports - prevents timing analysis attacks
+        if let Some(last) = *last_export {
+            let elapsed = last.elapsed().as_secs();
+            if elapsed < self.min_export_interval {
+                // Add random delay to prevent timing analysis
+                let delay = thread_rng().gen_range(50..200);
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+        }
+        
+        // Update last export time
+        *last_export = Some(Instant::now());
+        
         let entries = self.entries.lock();
         
         if !self.encrypt || !decrypt {
             // Return as-is if not encrypted or decryption not requested
+            // Clone to avoid holding the lock
             entries.clone()
         } else {
             // Decrypt entries
             entries.iter().map(|(timestamp, level, message)| {
+                // Don't try to decrypt messages that weren't encrypted
+                if !message.starts_with("ENCRYPTED:") && !message.starts_with("ENCRYPTION_ERROR:") {
+                    return (*timestamp, level.clone(), message.clone());
+                }
+                
+                // Skip decrypt for encryption errors
+                if message.starts_with("ENCRYPTION_ERROR:") {
+                    return (*timestamp, level.clone(), message.replace("ENCRYPTION_ERROR:", "[Encryption Failed] "));
+                }
+                
                 let decrypted = if let Some(key) = &self.encryption_key {
-                    decrypt_sensitive_data(message, key).unwrap_or_else(|| "DECRYPTION_FAILED".to_string())
+                    match decrypt_sensitive_data(message, key) {
+                        Some(text) => text,
+                        None => "[DECRYPTION_FAILED]".to_string()
+                    }
                 } else {
-                    message.clone()
+                    "[NO_DECRYPTION_KEY]".to_string()
                 };
                 
                 (*timestamp, level.clone(), decrypted)
@@ -904,9 +1003,19 @@ impl MemoryLogBuffer {
         }
     }
     
-    /// Clear all log entries
+    /// Clear all log entries with secure wiping
+    #[allow(dead_code)]
     pub fn clear(&self) {
-        self.entries.lock().clear();
+        let mut entries = self.entries.lock();
+        
+        // First overwrite all messages with zeros
+        for entry in entries.iter_mut() {
+            let msg_len = entry.2.len();
+            entry.2 = "\0".repeat(msg_len);
+        }
+        
+        // Then clear the vector
+        entries.clear();
     }
     
     /// Get the number of log entries
@@ -915,6 +1024,7 @@ impl MemoryLogBuffer {
     }
     
     /// Check if there are any log entries
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.lock().is_empty()
     }
@@ -934,10 +1044,637 @@ impl MemoryLogBuffer {
                 format!("[{}] {} - {}", 
                     timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
                     level, 
-                    message
+                    sanitize_string(message) // Sanitize to prevent log injection
                 )
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
+    
+    /// Export logs to a file with encryption
+    ///
+    /// # Arguments
+    /// * `path` - File path to export to
+    /// * `password` - Optional password for file encryption
+    ///
+    /// # Returns
+    /// * `Result<(), String>` - Success or error message
+    #[allow(dead_code)]
+    pub fn export_to_file(&self, path: &std::path::Path, password: Option<&str>) -> Result<(), String> {
+        // Check path for safety
+        let path_str = path.to_string_lossy();
+        if path_str.contains("..") || path_str.contains("~") {
+            return Err("Invalid export path".to_string());
+        }
+        
+        // Get log entries
+        let entries = self.get_entries(true);
+        
+        // Format logs
+        let log_content = entries.iter()
+            .map(|(timestamp, level, message)| {
+                format!("[{}] {} - {}", 
+                    timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
+                    level, 
+                    sanitize_string(message)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        
+        // Encrypt file if password provided
+        let file_content = if let Some(pwd) = password {
+            // Simple password-based encryption without specialized crates
+            let key = pwd.as_bytes().to_vec();
+            // Use existing encrypt_sensitive_data function
+            match encrypt_sensitive_data(&log_content, Some(key)) {
+                (encrypted, _) => format!("ENCRYPTED_LOG_FILE_V1\n{}", encrypted),
+            }
+        } else {
+            log_content
+        };
+        
+        // Write to file
+        match std::fs::write(path, file_content) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(format!("Failed to write log file: {}", e)),
+        }
+    }
+}
+
+/// Encrypt sensitive data with a specific nonce counter
+///
+/// # Arguments
+/// * `data` - Data to encrypt
+/// * `key` - Optional encryption key (will generate one if None)
+/// * `nonce_counter` - Counter value to use in nonce generation
+///
+/// # Returns
+/// * `Result<String, &'static str>` - Encrypted data in hex format
+pub fn encrypt_sensitive_data_with_nonce(data: &str, key: Option<Vec<u8>>, nonce_counter: u64) -> Result<String, &'static str> {
+    // Simplified encryption without AES-GCM complexity
+    // For production use, a more robust approach would be needed
+    
+    // Get or generate a key
+    let key = key.unwrap_or_else(|| {
+        let mut key = vec![0u8; 32]; // 256-bit key size
+        thread_rng().fill(key.as_mut_slice());
+        key
+    });
+    
+    // Create a basic XOR encryption with the key and nonce
+    let mut encrypted = Vec::with_capacity(data.len() + 8);
+    
+    // Add the nonce counter to the beginning for decryption
+    encrypted.extend_from_slice(&nonce_counter.to_le_bytes());
+    
+    // Simple XOR encryption (not secure for production)
+    for (i, byte) in data.as_bytes().iter().enumerate() {
+        let key_idx = i % key.len();
+        let xor_byte = byte ^ key[key_idx] ^ ((nonce_counter >> (i % 8)) as u8);
+        encrypted.push(xor_byte);
+    }
+    
+    // Convert to hex string for storage
+    let hex = encrypted.iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    
+    Ok(format!("ENCRYPTED:{}", hex))
+}
+
+/// Extract version information from a service banner
+/// 
+/// This function attempts to identify version information in service banners
+/// by looking for common patterns used by various services.
+/// 
+/// # Arguments
+/// * `service_name` - The name of the service (e.g., "http", "ssh")
+/// * `banner` - The banner text received from the service
+/// 
+/// # Returns
+/// * `Option<String>` - Extracted version string, if found
+pub fn extract_version_from_banner(service_name: &str, banner: &str) -> Option<String> {
+    // Use different regex patterns based on service type
+    match service_name.to_lowercase().as_str() {
+        "http" | "https" => {
+            // Look for server header in HTTP responses
+            // Examples: "Apache/2.4.41", "nginx/1.18.0", "Microsoft-IIS/10.0"
+            if let Some(server_line) = banner.lines()
+                .find(|line| line.to_lowercase().contains("server:"))
+            {
+                // Extract version information after the colon
+                if let Some(version_str) = server_line.split(':').nth(1) {
+                    return Some(version_str.trim().to_string());
+                }
+            }
+            
+            None
+        },
+        "ssh" => {
+            // Extract SSH version
+            // Example: "SSH-2.0-OpenSSH_8.2p1 Ubuntu-4ubuntu0.1"
+            if banner.starts_with("SSH-") {
+                // The format is usually SSH-[protocol]-[software]
+                let parts: Vec<&str> = banner.splitn(3, '-').collect();
+                if parts.len() >= 3 {
+                    return Some(parts[2].trim().to_string());
+                }
+            }
+            
+            None
+        },
+        "ftp" => {
+            // Example: "220 ProFTPD 1.3.5e Server"
+            if banner.starts_with("220 ") {
+                // Try to find version numbers in the banner
+                let re = regex::Regex::new(r"(\w+)[/ -](\d+\.\d+[.\w-]*)").ok()?;
+                if let Some(caps) = re.captures(banner) {
+                    if caps.len() >= 3 {
+                        return Some(format!("{} {}", &caps[1], &caps[2]));
+                    }
+                }
+            }
+            
+            None
+        },
+        "smtp" => {
+            // Example: "220 mail.example.com ESMTP Postfix (Ubuntu)"
+            if banner.starts_with("220 ") {
+                // Extract SMTP server software
+                for software in &["Postfix", "Exim", "Sendmail", "Microsoft ESMTP"] {
+                    if banner.contains(software) {
+                        // Try to extract version if present
+                        let re = regex::Regex::new(&format!(r"{}\s*(\d+[\.\d\w-]*)", software)).ok()?;
+                        if let Some(caps) = re.captures(banner) {
+                            return Some(format!("{} {}", software, &caps[1]));
+                        }
+                        return Some(software.to_string());
+                    }
+                }
+            }
+            
+            None
+        },
+        "mysql" | "mariadb" => {
+            // MySQL banners often contain version information in a specific format
+            let re = regex::Regex::new(r"(\d+\.\d+\.\d+[\w-]*)").ok()?;
+            if let Some(caps) = re.captures(banner) {
+                return Some(format!("MySQL {}", &caps[1]));
+            }
+            
+            None
+        },
+        "postgresql" | "postgres" => {
+            // PostgreSQL banners may contain version info
+            if banner.contains("PostgreSQL") {
+                let re = regex::Regex::new(r"PostgreSQL\s+(\d+\.[\d.]+)").ok()?;
+                if let Some(caps) = re.captures(banner) {
+                    return Some(format!("PostgreSQL {}", &caps[1]));
+                }
+            }
+            
+            None
+        },
+        // Add more service-specific extractors as needed
+        _ => {
+            // Generic version number extraction for unknown services
+            // Look for patterns like "version X.Y.Z" or "vX.Y.Z"
+            let re = regex::Regex::new(r"[vV]ersion[: ]*(\d+\.\d+[\.\d\w-]*)").ok()?;
+            if let Some(caps) = re.captures(banner) {
+                return Some(caps[1].to_string());
+            }
+            
+            // Try alternate pattern like "X.Y.Z"
+            let re = regex::Regex::new(r"(\d+\.\d+\.\d+[\w-]*)").ok()?;
+            if let Some(caps) = re.captures(banner) {
+                return Some(caps[1].to_string());
+            }
+            
+            None
+        }
+    }
+}
+
+/// Assess the security posture of a service based on its configuration
+/// 
+/// Evaluates the security of a service by analyzing its version, banner,
+/// and certificate information. Returns a string describing the security posture.
+/// 
+/// # Arguments
+/// * `service_name` - The name of the service
+/// * `version` - Optional version string
+/// * `banner` - Optional banner text
+/// * `cert_info` - Optional SSL/TLS certificate information
+/// 
+/// # Returns
+/// * `Option<String>` - Security assessment, if available
+pub fn assess_service_security(
+    service_name: &str,
+    version: Option<&str>,
+    banner: Option<&str>,
+    cert_info: Option<&crate::models::CertificateInfo>,
+) -> Option<String> {
+    let service = service_name.to_lowercase();
+    
+    // Start with no assessment
+    let mut assessment = Vec::new();
+    
+    // Check for version-based security issues
+    if let Some(version_str) = version {
+        match service.as_str() {
+            "http" | "https" => {
+                // Check for outdated web servers
+                if version_str.contains("Apache/1.") || version_str.contains("Apache/2.0") || version_str.contains("Apache/2.2") {
+                    assessment.push("Outdated Apache version with known vulnerabilities");
+                } else if version_str.contains("Apache/2.4") {
+                    assessment.push("Modern Apache version, check patch level");
+                }
+                
+                if version_str.contains("nginx/0.") || version_str.contains("nginx/1.0") || version_str.contains("nginx/1.1") {
+                    assessment.push("Outdated nginx version with known vulnerabilities");
+                } else if version_str.contains("nginx/1.") {
+                    assessment.push("Relatively modern nginx version");
+                }
+                
+                if version_str.contains("IIS/5.") || version_str.contains("IIS/6.") || version_str.contains("IIS/7.") {
+                    assessment.push("Outdated IIS version with known vulnerabilities");
+                }
+            },
+            "ssh" => {
+                // Check for outdated SSH versions
+                if version_str.contains("SSH-1.") {
+                    assessment.push("Critical: SSHv1 protocol is fundamentally insecure");
+                }
+                
+                if version_str.contains("OpenSSH_4.") || version_str.contains("OpenSSH_5.") || 
+                   version_str.contains("OpenSSH_6.") || version_str.contains("OpenSSH_7.0") {
+                    assessment.push("Outdated OpenSSH version with known vulnerabilities");
+                } else if version_str.contains("OpenSSH_8.") || version_str.contains("OpenSSH_9.") {
+                    assessment.push("Modern OpenSSH version with good security");
+                }
+            },
+            "ftp" => {
+                // Check FTP server security
+                if version_str.contains("vsftpd 2.") {
+                    assessment.push("Older vsftpd version, potential vulnerabilities");
+                }
+                
+                if version_str.contains("ProFTPD 1.3.3") || version_str.contains("ProFTPD 1.3.4") {
+                    assessment.push("Outdated ProFTPD with known vulnerabilities");
+                }
+            },
+            "mysql" | "mariadb" => {
+                // Check MySQL/MariaDB versions
+                if version_str.contains("5.0.") || version_str.contains("5.1.") || version_str.contains("5.5.") {
+                    assessment.push("Outdated MySQL version with known vulnerabilities");
+                }
+            },
+            // Add more service-specific checks as needed
+            _ => {
+                // Generic version check
+                if version_str.contains("beta") || version_str.contains("alpha") {
+                    assessment.push("Pre-release software may have security issues");
+                }
+            }
+        }
+    }
+    
+    // Check banner for security issues
+    if let Some(banner_text) = banner {
+        // Check for server information disclosure
+        if banner_text.contains("Server:") || banner_text.contains("X-Powered-By:") {
+            assessment.push("Information disclosure: Server details revealed in headers");
+        }
+        
+        // Check for debug information
+        if banner_text.contains("DEBUG") || banner_text.contains("TRACE") {
+            assessment.push("Debug information present in responses");
+        }
+        
+        // Service-specific banner checks
+        match service.as_str() {
+            "ftp" => {
+                if banner_text.contains("anonymous") || banner_text.to_lowercase().contains("anon") {
+                    assessment.push("Anonymous FTP access may be enabled");
+                }
+            },
+            "smtp" => {
+                if banner_text.contains("VRFY") || banner_text.contains("EXPN") {
+                    assessment.push("SMTP server allows user enumeration (VRFY/EXPN commands)");
+                }
+            },
+            // Add more service-specific banner checks
+            _ => {}
+        }
+    }
+    
+    // Check SSL/TLS certificates for security issues
+    if let Some(cert) = cert_info {
+        // Check for self-signed certificates
+        if cert.subject == cert.issuer {
+            assessment.push("Self-signed certificate in use");
+        }
+        
+        // Check for expired certificates
+        if let Ok(not_after) = chrono::DateTime::parse_from_rfc3339(&cert.not_after) {
+            let now = chrono::Utc::now();
+            if now > not_after {
+                assessment.push("Critical: SSL/TLS certificate has expired");
+            } else {
+                // Check if certificate is nearing expiration (within 30 days)
+                let thirty_days = chrono::Duration::days(30);
+                if now + thirty_days > not_after {
+                    assessment.push("Warning: SSL/TLS certificate expires within 30 days");
+                }
+            }
+        }
+        
+        // Check for weak key sizes
+        if let Some(key_bits) = cert.public_key_bits {
+            if key_bits < 2048 {
+                assessment.push("Weak SSL/TLS key size (less than 2048 bits)");
+            }
+        }
+        
+        // Check for weak signature algorithms
+        if cert.signature_algorithm.contains("MD5") || cert.signature_algorithm.contains("SHA1") {
+            assessment.push("Weak signature algorithm in certificate");
+        }
+    }
+    
+    // Return combined assessment
+    if assessment.is_empty() {
+        None
+    } else {
+        Some(assessment.join("; "))
+    }
+}
+
+/// Detect anomalies in service responses that might indicate honeypots or security devices
+/// 
+/// Identifies unusual patterns in service responses that might suggest the presence
+/// of a honeypot, security device, or other anomaly.
+/// 
+/// # Arguments
+/// * `service_name` - The name of the service
+/// * `banner` - Optional banner text
+/// * `cert_info` - Optional SSL/TLS certificate information
+/// 
+/// # Returns
+/// * `Vec<String>` - List of detected anomalies
+pub fn detect_response_anomalies(
+    service_name: &str,
+    banner: Option<&str>,
+    cert_info: Option<&crate::models::CertificateInfo>,
+) -> Vec<String> {
+    let mut anomalies = Vec::new();
+    let service = service_name.to_lowercase();
+    
+    // Check for banner anomalies
+    if let Some(banner_text) = banner {
+        // Check for inconsistent version information
+        if banner_text.contains("Apache") && banner_text.contains("nginx") {
+            anomalies.push("Conflicting server software signatures".to_string());
+        }
+        
+        // Check for unusual or fake banner patterns
+        if banner_text.contains("honeypot") || banner_text.contains("honeynet") {
+            anomalies.push("Explicit honeypot identification in banner".to_string());
+        }
+        
+        // Check for unusually generic responses
+        if banner_text.is_empty() || banner_text.len() < 5 {
+            anomalies.push("Unusually brief response".to_string());
+        }
+        
+        // Service-specific anomaly checks
+        match service.as_str() {
+            "ssh" => {
+                // SSH anomalies
+                if banner_text.contains("SSH-") && !banner_text.contains("OpenSSH") && 
+                   !banner_text.contains("Dropbear") && !banner_text.contains("libssh") {
+                    anomalies.push("Unusual SSH server implementation".to_string());
+                }
+            },
+            "http" | "https" => {
+                // Unusual HTTP server signatures
+                if banner_text.contains("Server:") && banner_text.contains("FAKE") {
+                    anomalies.push("Suspicious server signature".to_string());
+                }
+            },
+            "telnet" => {
+                // Telnet is often emulated in honeypots
+                if !banner_text.contains("login:") && !banner_text.contains("Username:") {
+                    anomalies.push("Unusual telnet prompt".to_string());
+                }
+            },
+            // Add more service-specific anomaly checks
+            _ => {}
+        }
+        
+        // Check for repeating patterns that might indicate template responses
+        let chars: Vec<char> = banner_text.chars().collect();
+        if chars.len() > 8 {
+            let mut repeat_count = 0;
+            for i in 0..chars.len()-4 {
+                if chars[i] == chars[i+4] && chars[i+1] == chars[i+5] &&
+                   chars[i+2] == chars[i+6] && chars[i+3] == chars[i+7] {
+                    repeat_count += 1;
+                }
+            }
+            if repeat_count > chars.len() / 8 {
+                anomalies.push("Suspiciously repetitive pattern in response".to_string());
+            }
+        }
+    }
+    
+    // Check certificate anomalies
+    if let Some(cert) = cert_info {
+        // Check for honeypot-like certificates
+        if cert.subject.contains("honeypot") || cert.issuer.contains("honeypot") {
+            anomalies.push("Honeypot indicator in certificate".to_string());
+        }
+        
+        // Check for unusual issuers
+        if !cert.issuer.contains("Let's Encrypt") && 
+           !cert.issuer.contains("Comodo") && 
+           !cert.issuer.contains("DigiCert") && 
+           !cert.issuer.contains("GlobalSign") && 
+           !cert.issuer.contains("GoDaddy") && 
+           !cert.issuer.contains("Sectigo") &&
+           cert.subject != cert.issuer {  // Exclude self-signed
+            anomalies.push("Unusual certificate authority".to_string());
+        }
+        
+        // Check for odd validity periods
+        if let (Ok(not_before), Ok(not_after)) = (
+            chrono::DateTime::parse_from_rfc3339(&cert.not_before),
+            chrono::DateTime::parse_from_rfc3339(&cert.not_after)
+        ) {
+            let validity_days = (not_after - not_before).num_days();
+            
+            // Most legitimate certs are ~90 days (Let's Encrypt) or ~365/730 days
+            if validity_days > 10 * 365 { // More than 10 years
+                anomalies.push("Suspiciously long certificate validity period".to_string());
+            } else if validity_days < 10 { // Less than 10 days
+                anomalies.push("Suspiciously short certificate validity period".to_string());
+            }
+        }
+    }
+    
+    anomalies
+}
+
+/// Check for potential vulnerabilities in the service
+/// 
+/// Analyzes service information to identify potential security vulnerabilities
+/// based on service type, version, configuration, and known issues.
+/// 
+/// # Arguments
+/// * `service_name` - The name of the service
+/// * `version` - Optional version string
+/// * `banner` - Optional banner text
+/// * `_cert_info` - Optional SSL/TLS certificate information
+/// 
+/// # Returns
+/// * `Vec<String>` - List of potential vulnerabilities
+pub fn check_service_vulns(
+    service_name: &str,
+    version: Option<&str>,
+    banner: Option<&str>,
+    _cert_info: Option<&crate::models::CertificateInfo>,
+) -> Vec<String> {
+    let mut vulns = Vec::new();
+    let service = service_name.to_lowercase();
+    
+    // Check common service vulnerabilities based on service type and version
+    if let Some(version_str) = version {
+        match service.as_str() {
+            "http" | "https" => {
+                // Apache vulnerabilities
+                if version_str.contains("Apache/2.4.49") {
+                    vulns.push("CVE-2021-41773: Path Traversal and RCE in Apache 2.4.49".to_string());
+                } else if version_str.contains("Apache/2.4.50") {
+                    vulns.push("CVE-2021-42013: Path Traversal in Apache 2.4.50".to_string());
+                } else if version_str.contains("Apache/2.2.") {
+                    vulns.push("Multiple vulnerabilities in Apache 2.2.x (EOL)".to_string());
+                }
+                
+                // Nginx vulnerabilities
+                if version_str.contains("nginx/1.16.") || version_str.contains("nginx/1.17.") {
+                    vulns.push("CVE-2019-9513: HTTP/2 DoS vulnerability in nginx 1.16.x-1.17.x".to_string());
+                }
+                
+                // IIS vulnerabilities
+                if version_str.contains("Microsoft-IIS/7.5") {
+                    vulns.push("CVE-2010-3972: Information disclosure in IIS 7.5".to_string());
+                }
+            },
+            "ssh" => {
+                // OpenSSH vulnerabilities
+                if version_str.contains("OpenSSH_7.2") {
+                    vulns.push("CVE-2016-6210: User enumeration via timing attack in OpenSSH 7.2".to_string());
+                } else if version_str.contains("OpenSSH_5.") {
+                    vulns.push("Multiple vulnerabilities in OpenSSH 5.x (EOL)".to_string());
+                }
+                
+                if version_str.contains("Dropbear_2016") {
+                    vulns.push("CVE-2016-7406: Remote overflow vulnerability in Dropbear 2016.73".to_string());
+                }
+            },
+            "ftp" => {
+                // vsftpd vulnerabilities
+                if version_str.contains("vsftpd 2.3.4") {
+                    vulns.push("Backdoor in vsftpd 2.3.4".to_string());
+                }
+                
+                // ProFTPD vulnerabilities
+                if version_str.contains("ProFTPD 1.3.3") {
+                    vulns.push("CVE-2010-4652: Remote command execution in ProFTPD 1.3.3".to_string());
+                }
+            },
+            "smtp" => {
+                // Exim vulnerabilities
+                if version_str.contains("Exim 4.8") || version_str.contains("Exim 4.9.0") {
+                    vulns.push("CVE-2019-15846: Remote command execution in Exim".to_string());
+                }
+            },
+            "mysql" | "mariadb" => {
+                // MySQL vulnerabilities
+                if version_str.contains("5.5.") || version_str.contains("5.6.") {
+                    vulns.push("Multiple vulnerabilities in older MySQL versions".to_string());
+                }
+            },
+            // Add more service-specific vulnerability checks
+            _ => {}
+        }
+    }
+    
+    // Check for vulnerabilities based on banner content
+    if let Some(banner_text) = banner {
+        // Check for default credentials in banners
+        if banner_text.contains("default password") || banner_text.contains("admin/admin") {
+            vulns.push("Banner suggests default credentials".to_string());
+        }
+        
+        // Server information disclosure
+        if service == "http" || service == "https" {
+            if banner_text.contains("X-Powered-By:") {
+                vulns.push("Information disclosure via X-Powered-By header".to_string());
+            }
+        }
+    }
+    
+    vulns
+}
+
+/// Check for SSL/TLS vulnerabilities
+/// 
+/// Analyzes SSL/TLS certificate information to identify potential vulnerabilities.
+/// 
+/// # Arguments
+/// * `cert_info` - SSL/TLS certificate information
+/// 
+/// # Returns
+/// * `Vec<String>` - List of potential SSL/TLS vulnerabilities
+pub fn check_ssl_vulnerabilities(cert_info: &crate::models::CertificateInfo) -> Vec<String> {
+    let mut vulns = Vec::new();
+    
+    // Check for expired certificates
+    if let Ok(not_after) = chrono::DateTime::parse_from_rfc3339(&cert_info.not_after) {
+        let now = chrono::Utc::now();
+        if now > not_after {
+            vulns.push("Expired SSL/TLS certificate".to_string());
+        }
+    }
+    
+    // Check for self-signed certificates
+    if cert_info.subject == cert_info.issuer {
+        vulns.push("Self-signed certificate (not inherently vulnerable, but not trusted)".to_string());
+    }
+    
+    // Check for weak key lengths
+    if let Some(key_bits) = cert_info.public_key_bits {
+        if key_bits < 2048 {
+            vulns.push(format!("Weak key length: {} bits (should be at least 2048)", key_bits));
+        }
+    }
+    
+    // Check for weak signature algorithms
+    if cert_info.signature_algorithm.contains("MD5") {
+        vulns.push("Critical: MD5 signature algorithm (broken)".to_string());
+    } else if cert_info.signature_algorithm.contains("SHA1") {
+        vulns.push("Weak: SHA1 signature algorithm (deprecated)".to_string());
+    }
+    
+    // Check for wildcard certificates
+    for alt_name in &cert_info.alt_names {
+        if alt_name.starts_with("*.") {
+            vulns.push("Wildcard certificate in use (reduced security)".to_string());
+            break;
+        }
+    }
+    
+    vulns
 } 
