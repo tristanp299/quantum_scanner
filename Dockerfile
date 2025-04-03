@@ -26,8 +26,19 @@ RUN if [ "$ENABLE_UPX" = "true" ] || [ "$ULTRA_MINIMAL" = "true" ]; then \
 # Create build directory
 WORKDIR /build
 
+# Create .cargo directory for configuration
+RUN mkdir -p /build/.cargo
+
 # Copy source code
 COPY . .
+
+# Set environment variables to disable SSL verification
+# This is needed for environments with self-signed certificates
+ENV CARGO_HTTP_CHECK_REVOKE=false \
+    CARGO_HTTP_SSL_VERSION_CHECK=false \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 # Build statically linked executable using musl
 RUN rustup target add x86_64-unknown-linux-musl

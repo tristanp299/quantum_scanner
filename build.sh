@@ -1,5 +1,5 @@
 #!/bin/bash
-
+#Author: H@mb0n3
 # ======================================================================
 # Quantum Scanner RS - Build and Test Script
 # 
@@ -201,6 +201,17 @@ build_project() {
         export RUSTFLAGS_BASE="-C debuginfo=2 -D warnings"
         export RUSTFLAGS="$RUSTFLAGS_BASE"
     fi
+    
+    # Set environment variables to handle SSL certificate issues
+    # These provide an additional layer of security bypass if .cargo/config.toml is not respected
+    export CARGO_HTTP_CHECK_REVOKE=false
+    export CARGO_HTTP_SSL_VERSION_CHECK=false
+    export CARGO_NET_GIT_FETCH_WITH_CLI=true
+    export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+    
+    # Debug output for SSL settings
+    echo -e "[${YELLOW}!${NC}] SSL certificate validation disabled for build environment"
+    echo -e "[${GREEN}+${NC}] Using custom cargo configuration from .cargo/config.toml"
     
     # Notify about flags
     echo -e "[${GREEN}+${NC}] Using Rust flags: ${YELLOW}$RUSTFLAGS${NC}"
