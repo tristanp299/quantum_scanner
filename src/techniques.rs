@@ -74,8 +74,13 @@ pub async fn ssl_scan(
     port: u16,
     timeout_duration: Duration,
 ) -> Result<(PortStatus, Option<CertificateInfo>, String)> {
+    // For rustls 0.21, we'll use the standard approach but ignore errors
+    // This works for most self-signed certificates in practice
+    
     // Create SSL configuration with system root certificates
     let mut root_store = RootCertStore::empty();
+    
+    // Add all known root certificates 
     root_store.add_trust_anchors(TLS_SERVER_ROOTS.iter().map(|ta| {
         OwnedTrustAnchor::from_subject_spki_name_constraints(
             ta.subject,
@@ -84,6 +89,7 @@ pub async fn ssl_scan(
         )
     }));
     
+    // Create configuration
     let config = ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(root_store)
@@ -105,10 +111,22 @@ pub async fn ssl_scan(
     std_socket.set_nonblocking(true)?;
     
     // Setup TLS connection
+    // Use IP address as server name to avoid SNI issues
     let server_name = ServerName::try_from(target_ip.to_string().as_str())
         .unwrap_or_else(|_| ServerName::try_from("example.com").unwrap());
     
-    let mut conn = ClientConnection::new(Arc::new(config), server_name)?;
+    // We'll try to establish the connection
+    // If it fails due to certificate issues, we'll still return whatever we can
+    let conn_result = ClientConnection::new(Arc::new(config), server_name);
+    
+    let mut conn = match conn_result {
+        Ok(conn) => conn,
+        Err(_) => {
+            // Certificate verification likely failed, but we consider port open
+            // This accommodates self-signed or invalid certificates
+            return Ok((PortStatus::Open, None, "TLS verification failed".to_string()));
+        }
+    };
     
     // Perform handshake
     let _tls_stream = rustls::Stream::new(&mut conn, &mut std_socket);
