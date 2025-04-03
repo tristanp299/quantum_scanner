@@ -5,6 +5,10 @@ edition = "2021"
 authors = ["Hamb0n3"]
 description = "Advanced port scanner with evasion capabilities"
 
+[[bin]]
+name = "quantum_scanner"
+path = "src/main.rs"
+
 # Remove any profile settings that might be causing conflicts
 # [profile.release]
 # lto = true

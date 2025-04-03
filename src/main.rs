@@ -21,7 +21,7 @@ use models::{ScanType, PortRange, PortRanges, TopPorts};
 
 /// Advanced port scanner with evasion capabilities
 #[derive(Parser)]
-#[clap(author, version, about, long_about = None)]
+#[clap(author, version, about, long_about = None, name = "quantum_scanner")]
 struct Args {
     /// Target IP address, hostname, or CIDR notation for subnet
     #[clap(value_parser)]
@@ -496,23 +496,64 @@ fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
                 return Ok(());
             }
             
-            // Try to unmount
+            // First try to sync all file systems to ensure all data is written
+            let _ = std::process::Command::new("sync").status();
+            
+            // Try to unmount - first try normal unmount
             let status = std::process::Command::new("umount")
                 .arg(mount_point.to_str().unwrap_or_default())
-                .status()?;
-            
-            if status.success() {
-                info!("Unmounted RAM disk from {}", mount_point.display());
+                .status();
                 
-                // Remove directory after unmounting
-                if mount_point.exists() {
-                    std::fs::remove_dir_all(mount_point)?;
+            // If normal unmount fails, try lazy unmount (-l option)
+            if status.is_err() || !status.unwrap().success() {
+                info!("Standard unmount failed, trying lazy unmount...");
+                
+                // Add a small delay to allow any pending operations to complete
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                
+                let lazy_status = std::process::Command::new("umount")
+                    .arg("-l")  // Lazy unmount - detach filesystem now, cleanup resources later
+                    .arg(mount_point.to_str().unwrap_or_default())
+                    .status()?;
+                    
+                if !lazy_status.success() {
+                    return Err(anyhow::anyhow!("Failed to unmount RAM disk at {}", mount_point.display()));
+                }
+            }
+            
+            info!("Unmounted RAM disk from {}", mount_point.display());
+            
+            // Give the system a moment to complete the unmount
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            
+            // Remove directory after unmounting
+            if mount_point.exists() {
+                // Try multiple times to remove the directory
+                for attempt in 0..3 {
+                    // First try with rmdir for a clean unmounted directory
+                    if attempt == 0 {
+                        let _ = std::process::Command::new("rmdir")
+                            .arg(mount_point.to_str().unwrap_or_default())
+                            .status();
+                    }
+                    
+                    // Then try with remove_dir_all if rmdir didn't work
+                    match std::fs::remove_dir_all(mount_point) {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            // Log error but keep trying
+                            info!("Remove directory attempt {}: {}", attempt + 1, e);
+                            // Wait a bit and try again
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                        }
+                    }
                 }
                 
-                return Ok(());
-            } else {
-                return Err(anyhow::anyhow!("Failed to unmount RAM disk at {}", mount_point.display()));
+                // If we couldn't remove it after 3 tries, log it but don't fail
+                info!("Could not remove mount point directory after unmounting, it will be cleaned up by the system later");
             }
+            
+            return Ok(());
         }
     }
     
@@ -681,18 +722,13 @@ fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>, anyhow::Error
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Process help flag specially
-    // This is needed because clap doesn't automatically exit after showing help
-    // We want to avoid running the scanner when just viewing help
-    if std::env::args().any(|arg| arg == "--help" || arg == "-h") {
-        // Parse arguments to trigger help display
-        let _ = Args::parse();
-        // Explicitly exit after help is displayed
-        std::process::exit(0);
-    }
+    // Override the binary name for parsing
+    let args: Vec<String> = std::iter::once("quantum_scanner".to_string())
+        .chain(std::env::args().skip(1))
+        .collect();
     
-    // Parse command-line arguments
-    let mut args = Args::parse();
+    // Parse command-line arguments with corrected binary name
+    let mut args = Args::parse_from(args);
     
     // Check if we're only fixing a log file without scanning
     if let Some(log_file) = &args.fix_log_file {
