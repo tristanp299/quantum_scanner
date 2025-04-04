@@ -471,7 +471,7 @@ EOF
 
 # Function to build static binary locally (fallback method)
 build_static_local() {
-    echo -e "${BLUE}[*] Building portable binary with dynamic linking...${NC}"
+    echo -e "${BLUE}[*] Building portable binary with musl...${NC}"
     
     # Check if musl-tools are installed
     if ! command -v musl-gcc &> /dev/null; then
@@ -486,18 +486,21 @@ build_static_local() {
         return 1
     fi
     
-    # Build the binary with regular approach (not static)
-    echo -e "${BLUE}[*] Building with regular release target...${NC}"
-    if cargo build --release; then
+    # Add musl target
+    rustup target add x86_64-unknown-linux-musl
+    
+    # Build with safer flags for musl
+    echo -e "${BLUE}[*] Building with musl target...${NC}"
+    if RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-lgcc" cargo build --release --target=x86_64-unknown-linux-musl; then
         echo -e "${GREEN}[+] Build completed successfully${NC}"
         
         # Strip the binary if it exists
         echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
-        if [ -f "target/release/quantum_scanner" ]; then
-            strip -s target/release/quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
+        if [ -f "target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then
+            strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
             
             # Copy to root directory
-            cp target/release/quantum_scanner ./quantum_scanner
+            cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
             chmod +x ./quantum_scanner
             
             # Show binary size
@@ -509,8 +512,31 @@ build_static_local() {
             return 1
         fi
     else
-        echo -e "${RED}[!] Build failed${NC}"
-        return 1
+        echo -e "${RED}[!] Build failed, trying without lgcc flag...${NC}"
+        if RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl; then
+            echo -e "${GREEN}[+] Build completed successfully${NC}"
+            
+            # Strip the binary if it exists
+            echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
+            if [ -f "target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then
+                strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
+                
+                # Copy to root directory
+                cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
+                chmod +x ./quantum_scanner
+                
+                # Show binary size
+                BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
+                echo -e "${GREEN}[+] Final binary size: ${YELLOW}$BIN_SIZE${NC}"
+                return 0
+            else
+                echo -e "${RED}[!] Binary not found at expected location${NC}"
+                return 1
+            fi
+        else
+            echo -e "${RED}[!] All build attempts failed${NC}"
+            return 1
+        fi
     fi
 }
 
@@ -558,9 +584,9 @@ apply_binary_hardening() {
             
             if [ "$ULTRA_MINIMAL" = true ]; then
                 echo -e "${YELLOW}[!] Using extreme compression (slows startup time)...${NC}"
-                upx --best --ultra-brute "$BINARY_PATH" || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
+                upx --no-backup --brute "$BINARY_PATH" || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
             else
-                upx --best "$BINARY_PATH" || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
+                upx --no-backup "$BINARY_PATH" || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
             fi
         else
             echo -e "${YELLOW}[!] UPX not found, skipping compression. Install UPX with: sudo apt install upx${NC}"

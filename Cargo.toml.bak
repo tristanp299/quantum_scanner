@@ -10,13 +10,12 @@ name = "quantum_scanner"
 path = "src/main.rs"
 
 # Enable link-time optimization for smaller binary size
-# Modified to make safer static builds
 [profile.release]
-lto = "thin"  # Use thin LTO instead of fat LTO
+lto = true
 codegen-units = 1
-opt-level = 2  # Reduced optimization level for better stability
-strip = false  # Let the build script handle stripping
-panic = "unwind"  # Use unwinding for better error information
+opt-level = 3
+strip = true  # Automatically strip symbols from the binary
+panic = "abort" # Simplify panic handling for smaller binaries
 
 [dependencies]
 # Async runtime

@@ -78,29 +78,35 @@ RUN mkdir -p /tmp/crates-cache && \
     
 # Build statically linked executable using musl
 RUN rustup target add x86_64-unknown-linux-musl
+
 # Use musl-gcc as the C compiler for the musl target
 ENV CC_x86_64_unknown_linux_musl=musl-gcc
-RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl || \
-    RUSTFLAGS="-C target-feature=+crt-static" cargo build --offline --release --target=x86_64-unknown-linux-musl || \
-    echo "Build failed, please check logs"
 
-# Apply extreme binary optimization and compression
-# 1. Strip all symbols
+# Important: Modified RUSTFLAGS to add -lgcc and avoid aggressive size optimizations
+# that can cause segmentation faults in static builds
+RUN RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-lgcc -C opt-level=2" cargo build --release --target=x86_64-unknown-linux-musl || \
+    RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-lgcc -C opt-level=2" cargo build --offline --release --target=x86_64-unknown-linux-musl || \
+    echo "First build approach failed, trying alternative flags..." && \
+    RUSTFLAGS="-C target-feature=+crt-static -C codegen-units=1" cargo build --release --target=x86_64-unknown-linux-musl
+
+# Apply binary optimization with care
+# 1. Strip symbols but don't use --strip-all to avoid breaking the binary
 RUN if [ -f "target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then \
-        strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner; \
+        strip --strip-unneeded target/x86_64-unknown-linux-musl/release/quantum_scanner; \
     else \
         echo "Binary not found, build may have failed"; \
         exit 1; \
     fi
 
-# 2. Apply UPX compression if enabled
+# 2. Apply UPX compression carefully if enabled
+# Avoid using ultra-brute compression which can cause segfaults
 RUN if [ "$ULTRA_MINIMAL" = "true" ]; then \
-        echo "Applying ultra-minimal UPX compression..." && \
-        stdbuf -o0 -e0 upx -vvv --best --ultra-brute target/x86_64-unknown-linux-musl/release/quantum_scanner || \
-        echo "UPX ultra compression failed, continuing without it."; \
+        echo "Applying safer UPX compression..." && \
+        stdbuf -o0 -e0 upx --no-backup --lzma target/x86_64-unknown-linux-musl/release/quantum_scanner || \
+        echo "UPX compression failed, continuing without it."; \
     elif [ "$ENABLE_UPX" = "true" ]; then \
         echo "Applying standard UPX compression..." && \
-        stdbuf -o0 -e0 upx -vvv --best target/x86_64-unknown-linux-musl/release/quantum_scanner || \
+        stdbuf -o0 -e0 upx --no-backup target/x86_64-unknown-linux-musl/release/quantum_scanner || \
         echo "UPX compression failed, continuing without it."; \
     else \
         echo "Skipping UPX compression"; \
@@ -109,11 +115,11 @@ RUN if [ "$ULTRA_MINIMAL" = "true" ]; then \
 # 3. Display final file size for verification
 RUN ls -lh target/x86_64-unknown-linux-musl/release/quantum_scanner
 
-# Use a minimal base for the final image
-FROM scratch
+# Final stage with alpine for minimal runtime dependencies
+FROM alpine:latest
 
-# Copy the built binary from builder stage
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/quantum_scanner /quantum_scanner
+# Copy required libraries and the executable
+COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/quantum_scanner /usr/local/bin/quantum_scanner
 
 # Set entrypoint
-ENTRYPOINT ["/quantum_scanner"] 
+ENTRYPOINT ["/usr/local/bin/quantum_scanner"] 
