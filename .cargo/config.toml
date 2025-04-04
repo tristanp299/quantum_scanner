@@ -10,5 +10,6 @@ retry = 10
 # Disable SSL verification for the crates.io registry
 [source.crates-io]
 registry = "https://github.com/rust-lang/crates.io-index"
-protocol = "sparse"
-ssl-verify = false
+# These settings were causing warnings but are necessary for older cargo versions
+# protocol = "sparse"
+# ssl-verify = false
