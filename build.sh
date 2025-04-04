@@ -91,6 +91,9 @@ parse_args() {
                 ;;
             --static)
                 STATIC_BUILD=true
+                STRIP_BINARY=true  # Always strip static builds for smaller size
+                echo -e "${YELLOW}[!] Static builds with musl have compatibility issues.${NC}"
+                echo -e "${YELLOW}[!] Building portable binary with dynamic linking instead.${NC}"
                 shift
                 ;;
             --clean)
@@ -468,7 +471,7 @@ EOF
 
 # Function to build static binary locally (fallback method)
 build_static_local() {
-    echo -e "${BLUE}[*] Building static binary locally (fallback method)...${NC}"
+    echo -e "${BLUE}[*] Building portable binary with dynamic linking...${NC}"
     
     # Check if musl-tools are installed
     if ! command -v musl-gcc &> /dev/null; then
@@ -483,13 +486,8 @@ build_static_local() {
         return 1
     fi
     
-    # Setup environment variables for static build
-    echo -e "${BLUE}[*] Setting up environment for static build...${NC}"
-    export CC_x86_64_unknown_linux_gnu=gcc
-    export RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-static"
-    
-    # Build the binary with static flags
-    echo -e "${BLUE}[*] Building statically linked binary...${NC}"
+    # Build the binary with regular approach (not static)
+    echo -e "${BLUE}[*] Building with regular release target...${NC}"
     if cargo build --release; then
         echo -e "${GREEN}[+] Build completed successfully${NC}"
         
@@ -497,14 +495,6 @@ build_static_local() {
         echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
         if [ -f "target/release/quantum_scanner" ]; then
             strip -s target/release/quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
-            
-            # Check if the binary is statically linked
-            echo -e "${BLUE}[*] Checking if binary is statically linked...${NC}"
-            if ldd target/release/quantum_scanner | grep -q "not a dynamic executable"; then
-                echo -e "${GREEN}[+] Successfully built static binary${NC}"
-            else
-                echo -e "${YELLOW}[!] Binary may not be fully static, but will still work${NC}"
-            fi
             
             # Copy to root directory
             cp target/release/quantum_scanner ./quantum_scanner
@@ -519,31 +509,8 @@ build_static_local() {
             return 1
         fi
     else
-        echo -e "${RED}[!] Local build failed${NC}"
-        echo -e "${YELLOW}[!] Trying alternative compilation approach...${NC}"
-        
-        # Try with different flags as a last resort
-        export RUSTFLAGS="-C target-feature=+crt-static"
-        if cargo build --release; then
-            echo -e "${GREEN}[+] Alternative build approach succeeded${NC}"
-            
-            # Copy to root directory
-            if [ -f "target/release/quantum_scanner" ]; then
-                cp target/release/quantum_scanner ./quantum_scanner
-                chmod +x ./quantum_scanner
-                
-                # Show binary size
-                BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
-                echo -e "${GREEN}[+] Final binary size: ${YELLOW}$BIN_SIZE${NC}"
-                return 0
-            else
-                echo -e "${RED}[!] Binary not found after alternative build${NC}"
-                return 1
-            fi
-        else
-            echo -e "${RED}[!] All build attempts failed${NC}"
-            return 1
-        fi
+        echo -e "${RED}[!] Build failed${NC}"
+        return 1
     fi
 }
 
@@ -551,7 +518,19 @@ build_static_local() {
 apply_binary_hardening() {
     # Get binary path based on build type
     if [ "$STATIC_BUILD" = true ]; then
-        BINARY_PATH="./quantum_scanner"
+        # First check if we have a built binary
+        if [ -f "./quantum_scanner" ]; then
+            BINARY_PATH="./quantum_scanner"
+        # Then check musl target
+        elif [ -f "./target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then
+            BINARY_PATH="./target/x86_64-unknown-linux-musl/release/quantum_scanner"
+        # Finally check regular release path
+        elif [ -f "./target/release/quantum_scanner" ]; then
+            BINARY_PATH="./target/release/quantum_scanner"
+        else
+            echo -e "${RED}[!] Binary not found. Build may have failed.${NC}"
+            return 1
+        fi
     elif [ "$BUILD_TYPE" = "release" ]; then
         BINARY_PATH="./target/release/quantum_scanner"
     else
@@ -590,7 +569,7 @@ apply_binary_hardening() {
     
     # Copy binary to root directory for convenience
     if [ "$BINARY_PATH" != "./quantum_scanner" ]; then
-    cp "$BINARY_PATH" ./quantum_scanner
+        cp "$BINARY_PATH" ./quantum_scanner
         echo -e "${GREEN}[+] Binary copied to ./quantum_scanner${NC}"
     fi
     

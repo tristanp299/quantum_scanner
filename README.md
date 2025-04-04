@@ -1,104 +1,102 @@
-# Quantum Scanner (Rust Edition)
+# Quantum Scanner
 
-An advanced port scanner with evasion capabilities written in Rust.
+Advanced port scanner with evasion capabilities for red team operations.
 
 ## Features
 
-- **Multiple Scan Techniques**: SYN, ACK, FIN, XMAS, NULL, SSL, UDP, and more
-- **Stealthy Evasion**: Fragmentation, protocol mimicry, TLS echo scans
-- **Enhanced Security**: Optional memory-only operation, RAM disk support, secure cleanup
-- **Advanced Evasion**: OS fingerprint spoofing, TTL jittering, protocol mimicry
-- **Tor Integration**: Optional traffic routing through Tor (when available)
-- **Performance**: High-speed concurrent scanning leveraging Rust's async capabilities
-- **Service Detection**: Identifies services running on open ports
-- **SSL Analysis**: Examines SSL/TLS certificates and configuration
-- **Ultra-Minimal Binaries**: Extreme UPX compression enabled by default for smallest possible executables
-- **Cross-Platform**: Works on Linux, macOS, and Windows
-- **Top Ports Scanning**: Quick scan of the top 100 most common ports
+- Multiple scan techniques (SYN, SSL, UDP, ACK, FIN, XMAS, NULL, Window, TLS-Echo, Mimic, Frag)
+- Enhanced evasion techniques to avoid detection
+- Memory-only mode for operations that require no disk artifacts
+- Banner grabbing and service identification
+- IPv6 support
+- Tor routing support
+- OpSec-focused design
 
-## Security Notice
+## Building
 
-This tool is designed for network security professionals conducting authorized security tests. 
-Running port scans against networks or systems without explicit permission is illegal in many jurisdictions and violates most network use policies.
+The scanner includes a comprehensive build script that handles compilation for both regular and portable builds.
 
-**You are responsible for using this tool ethically and legally.**
+### Standard Build
 
-## Installation
-
-### Prerequisites
-
-- Rust 1.67.0 or later
-- Cargo
-- libpcap development files (for packet capture capabilities)
-- UPX (Optional but recommended for binary compression - installed by default)
-
-On Debian/Ubuntu systems:
-```
-sudo apt install libpcap-dev upx-ucl
-```
-
-On RHEL/Fedora:
-```
-sudo dnf install libpcap-devel upx
-```
-
-On macOS with Homebrew:
-```
-brew install libpcap upx
-```
-
-### Building from source
-
-```
-git clone https://github.com/yourusername/quantum_scanner_rs.git
-cd quantum_scanner_rs
+```bash
 ./build.sh
 ```
 
-For additional build options:
-```
-./build.sh --help
+### Portable Build (previously --static)
+
+```bash
+./build.sh --static
 ```
 
-To install the binary system-wide (requires root):
-```
-sudo ./build.sh --install
-```
+The `--static` flag now builds a well-optimized portable binary with dynamic linking, as full static builds with musl encountered compatibility issues. This approach provides better compatibility across systems.
 
-To build a fully static binary:
-```
-sudo ./build.sh --static
-```
+### Additional Build Options
 
-The compiled binary will be in `target/release/quantum_scanner` and also copied to `./quantum_scanner`.
+- `--strip`: Strip debug symbols (enabled by default for --static builds)
+- `--compress`: Apply UPX compression to reduce binary size
+- `--ultra`: Apply extreme UPX compression (slows startup time)
+- `--debug`: Build in debug mode
+- `--clean`: Clean build artifacts before building
+- `--no-fix`: Skip fixing dependencies in Cargo.toml
+
+### Build Improvements
+
+Recent improvements to the build process include:
+- Optimized dependency management
+- Better error handling for cross-platform compatibility
+- Enhanced performance with target-specific optimizations
+- RAM disk support for secure operations
+- Improved Docker integration for containerized builds
 
 ## Usage
 
-Basic syntax:
 ```
 quantum_scanner [OPTIONS] <TARGET>
 ```
 
-Examples:
+Where `<TARGET>` is an IP address, hostname, or CIDR notation for subnet.
+
+### Basic Example
+
+```bash
+sudo ./quantum_scanner 192.168.1.1
 ```
-# Simple SYN scan of common ports on a single host
-quantum_scanner 192.168.1.1
 
-# Scan the top 100 most common ports
-quantum_scanner --top-100 192.168.1.1
+### Scan Specific Ports
 
-# Comprehensive scan of a host with multiple techniques
-quantum_scanner --scan-types syn,fin,ssl,udp --ports 1-1000 192.168.1.1
+```bash
+sudo ./quantum_scanner -p 22,80,443 192.168.1.1
+```
 
-# Stealthy scan with evasion techniques
-quantum_scanner --evasion 192.168.1.1
+### Advanced Scan with Evasion Techniques
 
-# Memory-only mode for enhanced operational security
-quantum_scanner --memory-only 192.168.1.1
+```bash
+sudo ./quantum_scanner -E -s syn,fin,xmas 192.168.1.1 --random-delay
+```
 
-# Scan with protocol mimicry
-quantum_scanner --scan-types mimic --mimic-protocol HTTP 192.168.1.1
+### Memory-Only Mode
 
-# Scan an entire subnet
-quantum_scanner --scan-types syn --ports 22,80,443 192.168.1.0/24
-``` 
+```bash
+sudo ./quantum_scanner -m 192.168.1.1
+```
+
+## Requirements
+
+- Linux (tested on Kali, Ubuntu, Debian)
+- Rust compiler
+- Root privileges (for raw socket operations)
+
+## Security Considerations
+
+- Using the `-m` (memory-only) flag prevents writing logs to disk
+- Use `--secure-delete` to securely delete log files after operation
+- Consider using `--encrypt-logs` for sensitive operations
+- The `--use-tor` flag can provide additional anonymity when Tor is installed
+
+## License
+
+See LICENSE file for details.
+
+## Disclaimer
+
+This tool is provided for legitimate security testing and red team operations only. Users are responsible for ensuring they have proper authorization before scanning any systems. 

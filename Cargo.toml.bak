@@ -9,17 +9,14 @@ description = "Advanced port scanner with evasion capabilities"
 name = "quantum_scanner"
 path = "src/main.rs"
 
-# Enable link-time optimization for smaller binary size
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
-strip = true  # Automatically strip symbols from the binary
-panic = "abort" # Simplify panic handling for smaller binaries
+# Remove any profile settings that might be causing conflicts
+# [profile.release]
+# lto = true
+# embed-bitcode = false
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1.28", features = ["full", "time"] }
 
 # Network packet manipulation
 pnet = "0.33.0"
@@ -29,7 +26,7 @@ pnet_sys = "0.33.0"
 socket2 = "0.5.3"
 
 # TLS/SSL support
-rustls = { version = "0.21.0", features = ["dangerous_configuration"] }
+rustls = "0.21.0"
 rustls-pemfile = "1.0.2"
 webpki-roots = "0.25.2"
 x509-parser = { version = "0.15.0", optional = true }
@@ -60,7 +57,7 @@ regex = "1.5.4"
 clap = { version = "4.2.7", features = ["derive"] }
 log = "0.4.17"
 env_logger = "0.10.0"
-chrono = { version = "0.4.24", features = ["serde", "clock"] }
+chrono = { version = "0.4.24", features = ["serde"] }
 anyhow = "1.0.71"
 thiserror = "1.0.40"
 parking_lot = "0.12.1"
@@ -75,7 +72,7 @@ futures = "0.3.28"
 async-trait = "0.1.68"
 
 # Networking extras - replaced trust-dns with hickory-dns
-hickory-resolver = { version = "0.24.0", features = ["dns-over-rustls", "system-config", "tokio-runtime"] }
+hickory-resolver = { version = "0.24.0", features = ["dns-over-rustls"] }
 ipnet = "2.7.2"
 cidr-utils = "0.5.10"
 
@@ -85,7 +82,3 @@ full = ["x509-parser"]
 minimal-static = []
 secure-memory = ["zeroize"]
 enhanced-crypto = ["argon2", "chacha20poly1305"]
-
-# Add a build.rs script to set up build environment
-[build-dependencies]
-cc = "1.0"
