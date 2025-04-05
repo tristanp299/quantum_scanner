@@ -83,7 +83,6 @@ Performs a default scan (often a SYN scan of common TCP ports) against the targe
 ```bash
 sudo ./quantum_scanner 192.168.1.1
 ```
-*Self-teaching comment: `sudo` is often needed because stealthy scan types like SYN require crafting raw network packets, which is a privileged operation on most OSes.*
 
 ### Scan Specific Ports
 
@@ -100,7 +99,6 @@ Combines multiple stealthy scan types (`syn`, `fin`, `xmas`) with general evasio
 ```bash
 sudo ./quantum_scanner -E -s syn,fin,xmas 192.168.1.1 --random-delay
 ```
-*Self-teaching comment: Combining scan types can sometimes reveal more information about firewall rulesets. Random delays help mimic human interaction and avoid tripping simple thresholds.*
 
 ### Memory-Only Mode (High Stealth)
 
@@ -109,7 +107,6 @@ Instructs the scanner to operate entirely from RAM, avoiding disk writes for log
 ```bash
 sudo ./quantum_scanner -m 192.168.1.1
 ```
-*Self-teaching comment: If the machine you're scanning *from* gets compromised or investigated, memory-only operation helps ensure the scanner activity leaves minimal traces.*
 
 ### JSON Output for Tool Integration
 
@@ -134,7 +131,6 @@ Route scanning traffic through the Tor network for anonymization (requires Tor t
 ```bash
 sudo ./quantum_scanner --use-tor 192.168.1.1
 ```
-*Self-teaching comment: This adds some anonymity but significantly slows down scans and may not work for all scan types due to Tor limitations.*
 
 ### Comprehensive Command Options
 
