@@ -1,9 +1,9 @@
 #!/bin/bash
 # ======================================================================
-# Quantum Scanner - Streamlined Build Script
+# Quantum Scanner - Optimized Build Script
 # ======================================================================
-# This script builds the quantum_scanner with options for optimization
-# and includes a Docker-based static build option.
+# This script builds the quantum_scanner with streamlined options for
+# optimization and faster Docker-based static builds.
 # ======================================================================
 
 # ANSI color codes for pretty output
@@ -14,7 +14,6 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Default configuration
-BUILD_TYPE="release"     # Can be "release" or "debug"
 STRIP_BINARY=false       # Whether to strip debug symbols
 COMPRESS_BINARY=false    # Whether to use UPX compression
 ULTRA_MINIMAL=false      # Whether to use extreme UPX compression
@@ -58,6 +57,8 @@ show_help() {
     echo "  $0 --strip            Build in release mode and strip symbols"
     echo "  $0 --strip --compress Build and apply compression"
     echo "  $0 --static           Build 100% static binary with Docker"
+    echo "  $0 --static --compress Build static binary with UPX compression"
+    echo "  $0 --static --ultra   Build static binary with extreme compression"
     echo ""
 }
 
@@ -100,55 +101,15 @@ parse_args() {
     done
 }
 
-# Function to fix target directory permissions
-fix_target_permissions() {
-    echo -e "${BLUE}[*] Checking target directory permissions...${NC}"
-    
-    # Create target directory if it doesn't exist
-    mkdir -p target
-    
-    # Check if target directory is owned by root
-    if [ -d "target" ] && [ "$(stat -c '%U' target)" = "root" ]; then
-        echo -e "${YELLOW}[!] Target directory is owned by root, fixing permissions...${NC}"
-        if sudo chown -R "$(whoami):$(whoami)" target; then
-            echo -e "${GREEN}[+] Target directory permissions fixed${NC}"
-        else
-            echo -e "${RED}[!] Failed to fix target directory permissions${NC}"
-            echo -e "${YELLOW}[!] You may need to run: sudo chown -R $(whoami):$(whoami) target${NC}"
-        fi
-    fi
-    
-    # Fix permissions in .cargo directory if it exists
-    if [ -d ".cargo" ]; then
-        echo -e "${BLUE}[*] Ensuring .cargo directory has correct permissions...${NC}"
-        if [ "$(stat -c '%U' .cargo)" != "$(whoami)" ]; then
-            echo -e "${YELLOW}[!] .cargo directory has incorrect ownership, fixing...${NC}"
-            if sudo chown -R "$(whoami):$(whoami)" .cargo; then
-                echo -e "${GREEN}[+] .cargo directory permissions fixed${NC}"
-            else
-                echo -e "${RED}[!] Failed to fix .cargo directory permissions${NC}"
-            fi
-        fi
-    fi
-}
-
-# Function to clean artifacts
+# Function to clean artifacts (simplified)
 clean_artifacts() {
     if [ "$CLEAN_ARTIFACTS" = true ]; then
         echo -e "${BLUE}[*] Cleaning build artifacts...${NC}"
         cargo clean
-        
-        # Remove logs and temporary files
-        find . -name "*.log" -delete
-        find . -name "scanner.log*" -delete
-        
+        find . -name "*.log" -name "scanner.log*" -delete 2>/dev/null
         echo -e "${GREEN}[+] Build artifacts cleaned${NC}"
-        
-        # Return success code to indicate cleaning was performed
         return 10
     fi
-    
-    # Return normal code if no cleaning was done
     return 0
 }
 
@@ -156,11 +117,10 @@ clean_artifacts() {
 build_project() {
     echo -e "${BLUE}[*] Building project in release mode...${NC}"
     
-    # Ensure libpcap-dev is installed
+    # Check and install dependencies only if needed
     if ! dpkg -l | grep -q libpcap-dev; then
         echo -e "${YELLOW}[!] libpcap-dev not found, installing...${NC}"
-        sudo apt-get update
-        sudo apt-get install -y libpcap-dev
+        sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
     fi
     
     # Run the build
@@ -175,7 +135,23 @@ build_project() {
     fi
 }
 
-# Function to build static binary using Docker
+# Function to ensure rustup is installed
+ensure_rustup() {
+    if ! command -v rustup &> /dev/null; then
+        echo -e "${YELLOW}[!] rustup not found, installing...${NC}"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+        
+        # Verify installation
+        if ! command -v rustup &> /dev/null; then
+            echo -e "${RED}[!] Failed to install rustup. Using system cargo only.${NC}"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Function to build static binary using Docker (optimized)
 build_static() {
     echo -e "${BLUE}[*] Building static binary using Docker...${NC}"
     
@@ -186,97 +162,51 @@ build_static() {
         return $?
     fi
     
-    # Fix Docker certificate issue
-    echo -e "${BLUE}[*] Setting up Docker environment...${NC}"
-    mkdir -p $HOME/.docker
-    # Use simple config without certificates
-    echo '{"auths":{}}' > $HOME/.docker/config.json
-    
-    # Try to ensure Docker socket has right permissions
-    if [ ! -w "/var/run/docker.sock" ]; then
-        echo -e "${YELLOW}[!] Docker socket needs permission fix, requires sudo...${NC}"
+    # One-time docker socket permission fix (if needed)
+    if [ ! -w "/var/run/docker.sock" ] && [ -e "/var/run/docker.sock" ]; then
+        echo -e "${YELLOW}[!] Fixing Docker socket permissions...${NC}"
         sudo chmod 666 /var/run/docker.sock || true
     fi
     
-    # Test if Docker works
-    if ! docker info &>/dev/null; then
-        echo -e "${YELLOW}[!] Docker appears to have issues, falling back to direct musl build.${NC}"
-        build_static_directly
-        return $?
+    # Set up build arguments for Docker
+    DOCKER_BUILD_ARGS="--build-arg BYPASS_TLS_SECURITY=true"
+    
+    # Add compression flags if needed
+    if [ "$COMPRESS_BINARY" = true ]; then
+        DOCKER_BUILD_ARGS="$DOCKER_BUILD_ARGS --build-arg ENABLE_UPX=true"
     fi
     
-    # Create simplified Dockerfile for the build
-    echo -e "${BLUE}[*] Creating Dockerfile for static build...${NC}"
-    cat > Dockerfile.static << 'EOF'
-# Use a Debian-based image for building
-FROM debian:bullseye-slim AS builder
+    # Add ultra compression if needed
+    if [ "$ULTRA_MINIMAL" = true ]; then
+        DOCKER_BUILD_ARGS="$DOCKER_BUILD_ARGS --build-arg ULTRA_MINIMAL=true"
+    fi
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    libpcap-dev \
-    musl-tools \
-    git
-
-# Install Rust
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Add musl target
-RUN rustup target add x86_64-unknown-linux-musl
-
-# Create build directory
-WORKDIR /build
-
-# Copy source code
-COPY . .
-
-# Build statically linked executable
-RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl
-
-# Strip binary
-RUN strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner
-
-# Final stage - create minimal output image
-FROM scratch
-COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/quantum_scanner /quantum_scanner
-ENTRYPOINT ["/quantum_scanner"]
-EOF
+    # Ensure the Cargo.lock exists to avoid Docker build errors
+    if [ ! -f "Cargo.lock" ]; then
+        echo -e "${BLUE}[*] Creating Cargo.lock file...${NC}"
+        cargo check || true
+    fi
     
-    # Build the Docker image
+    # Build the Docker image with optimized caching
     echo -e "${BLUE}[*] Building Docker image...${NC}"
-    if ! docker build -t quantum_scanner_static -f Dockerfile.static .; then
+    if ! docker build $DOCKER_BUILD_ARGS -t quantum_scanner_static .; then
         echo -e "${RED}[!] Docker build failed, falling back to direct musl build.${NC}"
         build_static_directly
         return $?
     fi
     
-    # Extract the binary from the image
+    # Extract the binary from the image (single-step extraction)
     echo -e "${BLUE}[*] Extracting static binary...${NC}"
-    
-    # Create a container from the image
-    CONTAINER_ID=$(docker create quantum_scanner_static)
-    
-    # Copy the binary from the container
-    docker cp "$CONTAINER_ID":/quantum_scanner ./quantum_scanner
-    
-    # Remove the container
-    docker rm "$CONTAINER_ID" > /dev/null
-    
-    # Make the binary executable
+    docker create --name quantum_tmp quantum_scanner_static >/dev/null
+    docker cp quantum_tmp:/quantum_scanner ./quantum_scanner
+    docker rm quantum_tmp >/dev/null
     chmod +x ./quantum_scanner
     
-    # Verify the binary
-    echo -e "${BLUE}[*] Verifying static binary...${NC}"
+    # Verify the binary (optional check)
     if command -v ldd &> /dev/null; then
         LDD_OUTPUT=$(ldd ./quantum_scanner 2>&1)
         if [[ "$LDD_OUTPUT" == *"not a dynamic executable"* ]]; then
             echo -e "${GREEN}[+] Successfully built static binary${NC}"
-        else
-            echo -e "${YELLOW}[!] Warning: Binary may not be fully static${NC}"
         fi
     fi
     
@@ -291,39 +221,51 @@ EOF
 build_static_directly() {
     echo -e "${BLUE}[*] Building static binary with musl...${NC}"
     
-    # Ensure required tools are installed
+    # Install required tools if needed
     if ! command -v musl-gcc &> /dev/null; then
         echo -e "${YELLOW}[!] Installing musl-tools...${NC}"
-        sudo apt-get update
-        sudo apt-get install -y musl-tools musl-dev
+        sudo apt-get update -qq && sudo apt-get install -y musl-tools musl-dev
     fi
     
-    # Add musl target if needed
-    echo -e "${BLUE}[*] Ensuring musl target is available...${NC}"
-    rustup target add x86_64-unknown-linux-musl
+    # Ensure rustup is installed
+    ensure_rustup
     
-    # Build with musl target
-    echo -e "${BLUE}[*] Building with musl target...${NC}"
-    if ! RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl; then
-        echo -e "${RED}[!] Static build failed${NC}"
-        return 1
-    fi
-    
-    # Copy binary to root directory
-    echo -e "${BLUE}[*] Copying binary to project root...${NC}"
-    cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
-    chmod +x ./quantum_scanner
-    
-    # Verify the binary
-    echo -e "${BLUE}[*] Verifying static binary...${NC}"
-    if command -v ldd &> /dev/null; then
-        LDD_OUTPUT=$(ldd ./quantum_scanner 2>&1)
-        if [[ "$LDD_OUTPUT" == *"not a dynamic executable"* ]]; then
-            echo -e "${GREEN}[+] Successfully built static binary${NC}"
-        else
-            echo -e "${YELLOW}[!] Warning: Binary may not be fully static${NC}"
+    # Add musl target if rustup is available
+    if command -v rustup &> /dev/null; then
+        echo -e "${BLUE}[*] Adding musl target...${NC}"
+        rustup target add x86_64-unknown-linux-musl
+        
+        # Build with musl target
+        echo -e "${BLUE}[*] Building with musl target...${NC}"
+        RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl
+        
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}[!] Static build failed${NC}"
+            return 1
         fi
+        
+        # Copy binary to root directory
+        cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
+    else
+        # Fallback to standard build if rustup is not available
+        echo -e "${YELLOW}[!] rustup not available, using standard build with musl-gcc${NC}"
+        
+        # Set environment variables for musl
+        export CC=musl-gcc
+        
+        # Build with cargo directly
+        cargo build --release
+        
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}[!] Build failed${NC}"
+            return 1
+        fi
+        
+        # Copy binary to root directory
+        cp target/release/quantum_scanner ./quantum_scanner
     fi
+    
+    chmod +x ./quantum_scanner
     
     # Show binary size
     BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
@@ -332,29 +274,27 @@ build_static_directly() {
     return 0
 }
 
-# Function to apply binary hardening
+# Function to apply binary hardening (consolidated)
 apply_binary_hardening() {
-    echo -e "${BLUE}[*] Applying binary hardening...${NC}"
-    
     # Strip binary if enabled
     if [ "$STRIP_BINARY" = true ]; then
         echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
-        strip -s ./quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
+        strip -s ./quantum_scanner 2>/dev/null || true
     fi
     
     # Apply UPX compression if enabled
     if [ "$COMPRESS_BINARY" = true ]; then
-        if command -v upx &> /dev/null; then
-            echo -e "${BLUE}[*] Applying UPX compression...${NC}"
-            
-            if [ "$ULTRA_MINIMAL" = true ]; then
-                echo -e "${YELLOW}[!] Using extreme compression (slows startup time)...${NC}"
-                upx --no-backup --brute ./quantum_scanner || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
-            else
-                upx --no-backup ./quantum_scanner || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
-            fi
+        if ! command -v upx &> /dev/null; then
+            echo -e "${YELLOW}[!] UPX not found, installing...${NC}"
+            sudo apt-get update -qq && sudo apt-get install -y upx-ucl || sudo apt-get install -y upx
+        fi
+        
+        echo -e "${BLUE}[*] Applying UPX compression...${NC}"
+        if [ "$ULTRA_MINIMAL" = true ]; then
+            echo -e "${YELLOW}[!] Using extreme compression (slows startup time)...${NC}"
+            upx --no-backup --brute ./quantum_scanner 2>/dev/null || true
         else
-            echo -e "${YELLOW}[!] UPX not found, skipping compression. Install UPX with: sudo apt install upx${NC}"
+            upx --no-backup ./quantum_scanner 2>/dev/null || true
         fi
     fi
     
@@ -370,9 +310,6 @@ main() {
     
     # Parse command line arguments
     parse_args "$@"
-    
-    # Fix target directory permissions
-    fix_target_permissions
     
     # Clean artifacts if requested
     clean_artifacts

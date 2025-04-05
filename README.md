@@ -28,7 +28,6 @@ This scanner provides a range of capabilities tailored for sophisticated network
 
 The included `build.sh` script simplifies the compilation process.
 
-
 ### Standard Build
 
 Compiles a standard dynamically linked executable.
@@ -43,6 +42,22 @@ Previously known as `--static`, this option now creates a portable binary using 
 
 ```bash
 ./build.sh --static
+```
+
+### Docker-Based Builds
+
+The scanner can be built using Docker with a consolidated, security-focused Dockerfile. The build script automatically handles the Docker build process when using the `--static` option.
+
+Key Docker build features include:
+- Automatic adaptation to requested compression options (`--compress`, `--ultra`)
+- TLS/certificate issue workarounds for secure environments
+- Memory-optimized build flags for reliability
+- Fully static binary output using musl
+- Minimal final image based on scratch
+
+For custom Docker builds, you can also use build arguments directly:
+```bash
+docker build --build-arg ENABLE_UPX=true --build-arg BYPASS_TLS_SECURITY=true .
 ```
 
 ### Additional Build Options
@@ -307,7 +322,12 @@ When enhanced evasion is enabled (default: true), Quantum Scanner employs sophis
 - **Sophisticated Protocol Variants:** Can mimic specific protocol versions (e.g., HTTP/1.1, TLS 1.2) to blend with expected traffic patterns.
 - **Banner Grabbing Suppression:** Disables banner grabbing operations to reduce additional network traffic that might trigger alerts.
 
-Enhanced evasion mode is suitable for environments with advanced security monitoring and can effectively reduce the scanner's detection footprint.
+**Features Disabled in Enhanced Evasion Mode:**
+- **Banner Grabbing:** Automatically disabled to reduce additional network traffic that might trigger detection systems.
+- **Aggressive Service Detection:** Reduced to prevent generating patterns that could identify scanning activity.
+- **Sequential Scanning:** Replaced with more randomized patterns to avoid triggering threshold-based alerts.
+
+Enhanced evasion mode is suitable for environments with advanced security monitoring and can effectively reduce the scanner's detection footprint, at the cost of some detailed service information.
 
 ### Memory-Only Mode
 
