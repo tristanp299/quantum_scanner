@@ -1,9 +1,9 @@
 #!/bin/bash
 # ======================================================================
-# Quantum Scanner - Unified Build Script
+# Quantum Scanner - Streamlined Build Script
 # ======================================================================
-# This script combines SSL certificate handling, dependency fixes, and 
-# multiple build options into a single unified solution.
+# This script builds the quantum_scanner with options for optimization
+# and includes a Docker-based static build option.
 # ======================================================================
 
 # ANSI color codes for pretty output
@@ -15,13 +15,11 @@ NC='\033[0m' # No Color
 
 # Default configuration
 BUILD_TYPE="release"     # Can be "release" or "debug"
-STRIP_BINARY=false     # Whether to strip debug symbols
-COMPRESS_BINARY=false  # Whether to use UPX compression
-ULTRA_MINIMAL=false    # Whether to use extreme UPX compression
-STATIC_BUILD=false     # Whether to build a static binary
-FIX_DEPENDENCIES=true  # Whether to fix dependency formats in Cargo.toml
-CLEAN_ARTIFACTS=false  # Whether to clean build artifacts
-FULLY_STATIC=false     # Whether to build a fully static binary using clux/muslrust
+STRIP_BINARY=false       # Whether to strip debug symbols
+COMPRESS_BINARY=false    # Whether to use UPX compression
+ULTRA_MINIMAL=false      # Whether to use extreme UPX compression
+CLEAN_ARTIFACTS=false    # Whether to clean build artifacts
+STATIC_BUILD=false       # Whether to build a fully static binary using Docker
 
 # ======================================================================
 # FUNCTIONS
@@ -49,21 +47,17 @@ show_help() {
     echo ""
     echo -e "${BLUE}Options:${NC}"
     echo "  -h, --help            Show this help message"
-    echo "  -d, --debug           Build in debug mode (default: release)"
     echo "  -s, --strip           Strip debug symbols from binary"
     echo "  -c, --compress        Apply UPX compression to reduce binary size"
     echo "  -u, --ultra           Apply ultra compression (very slow startup)"
-    echo "  --static              Build static binary with enhanced compatibility"
-    echo "  --fully-static        Build 100% static binary with clux/muslrust"
+    echo "  --static              Build 100% static binary using Docker"
     echo "  --clean               Clean build artifacts before building"
-    echo "  --no-fix              Skip fixing dependencies in Cargo.toml"
     echo ""
     echo -e "${BLUE}Examples:${NC}"
     echo "  $0                    Build in release mode (default)"
-    echo "  $0 --debug            Build in debug mode"
     echo "  $0 --strip            Build in release mode and strip symbols"
-    echo "  $0 --static           Build static binary with enhanced compatibility"
-    echo "  $0 --fully-static     Build 100% static binary with zero dependencies"
+    echo "  $0 --strip --compress Build and apply compression"
+    echo "  $0 --static           Build 100% static binary with Docker"
     echo ""
 }
 
@@ -74,10 +68,6 @@ parse_args() {
             -h|--help)
                 show_help
                 exit 0
-                ;;
-            -d|--debug)
-                BUILD_TYPE="debug"
-                shift
                 ;;
             -s|--strip)
                 STRIP_BINARY=true
@@ -94,202 +84,52 @@ parse_args() {
                 ;;
             --static)
                 STATIC_BUILD=true
-                STRIP_BINARY=true  # Always strip static builds for smaller size
-                echo -e "${YELLOW}[!] Static builds with musl have compatibility issues.${NC}"
-                echo -e "${YELLOW}[!] Using an enhanced static linking method for better compatibility.${NC}"
-                shift
-                ;;
-            --fully-static)
-                FULLY_STATIC=true
-                STRIP_BINARY=true  # Always strip static builds for smaller size
-                echo -e "${YELLOW}[!] Building fully static binary with zero dependencies.${NC}"
-                echo -e "${YELLOW}[!] This produces a 100% static binary that can run anywhere.${NC}"
+                echo -e "${YELLOW}[!] Building fully static binary using Docker${NC}"
                 shift
                 ;;
             --clean)
                 CLEAN_ARTIFACTS=true
                 shift
                 ;;
-            --no-fix)
-                FIX_DEPENDENCIES=false
-                shift
-                ;;
             *)
                 echo -e "${RED}Unknown option:${NC} $1"
                 show_help
-        exit 1
+                exit 1
                 ;;
         esac
     done
 }
 
-# Function to create a backup of Cargo.toml
-backup_cargo_toml() {
-    if [ ! -f "Cargo.toml.bak" ]; then
-        echo -e "${BLUE}[*] Creating backup of Cargo.toml...${NC}"
-        cp Cargo.toml Cargo.toml.bak
-        echo -e "${GREEN}[+] Backup created: Cargo.toml.bak${NC}"
-    else
-        echo -e "${YELLOW}[!] Backup already exists (Cargo.toml.bak)${NC}"
+# Function to fix target directory permissions
+fix_target_permissions() {
+    echo -e "${BLUE}[*] Checking target directory permissions...${NC}"
+    
+    # Create target directory if it doesn't exist
+    mkdir -p target
+    
+    # Check if target directory is owned by root
+    if [ -d "target" ] && [ "$(stat -c '%U' target)" = "root" ]; then
+        echo -e "${YELLOW}[!] Target directory is owned by root, fixing permissions...${NC}"
+        if sudo chown -R "$(whoami):$(whoami)" target; then
+            echo -e "${GREEN}[+] Target directory permissions fixed${NC}"
+        else
+            echo -e "${RED}[!] Failed to fix target directory permissions${NC}"
+            echo -e "${YELLOW}[!] You may need to run: sudo chown -R $(whoami):$(whoami) target${NC}"
+        fi
     fi
-}
-
-# Function to fix the Cargo.toml file
-fix_cargo_toml() {
-    if [ "$FIX_DEPENDENCIES" = false ]; then
-        echo -e "${YELLOW}[!] Skipping dependency fixes (--no-fix option used)${NC}"
-        return 0
-    fi
-
-    echo -e "${BLUE}[*] Fixing dependency formats in Cargo.toml...${NC}"
     
-    # Use sed to fix dependency lines to use the full format for problematic crates
-    # Convert simple format to table format for these specific crates
-    sed -i 's/^aes-gcm = "\([^"]*\)"$/aes-gcm = { version = "\1" }/g' Cargo.toml
-    sed -i 's/^sha2 = "\([^"]*\)"$/sha2 = { version = "\1" }/g' Cargo.toml
-    sed -i 's/^chacha20poly1305 = "\([^"]*\)"$/chacha20poly1305 = { version = "\1" }/g' Cargo.toml
-    
-    echo -e "${GREEN}[+] Fixed dependency formats in Cargo.toml${NC}"
-}
-
-# Function to set up cargo configuration for SSL issues
-setup_cargo_config() {
-    echo -e "${BLUE}[*] Setting up cargo configuration for SSL issues...${NC}"
-    mkdir -p .cargo
-    
-    cat > .cargo/config.toml << 'EOF'
-# ======================================================================
-# Cargo Configuration for SSL Certificate Issues
-# ======================================================================
-
-# Network settings - use git CLI for fetching
-[net]
-git-fetch-with-cli = true
-retry = 10
-
-# Disable SSL verification for the crates.io registry
-[source.crates-io]
-registry = "https://github.com/rust-lang/crates.io-index"
-# These settings were causing warnings but are necessary for older cargo versions
-# protocol = "sparse"
-# ssl-verify = false
-EOF
-    
-    echo -e "${GREEN}[+] Created .cargo/config.toml${NC}"
-}
-
-# Function for Docker certificate fixes
-fix_docker_certs() {
-    echo -e "${BLUE}[*] Applying Docker certificate fixes...${NC}"
-    
-    # Check if running as root and ask for sudo if needed
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${YELLOW}[!] Docker certificate fixes require root privileges${NC}"
-        echo -e "${YELLOW}[!] Re-running with sudo for certificate fixes only...${NC}"
-        
-        # Execute just the certificate fixing part with sudo
-        sudo bash -c "
-            # Create Docker certificate directories
-            mkdir -p /etc/docker/certs.d/docker.io
-            mkdir -p /etc/docker/certs.d/registry.docker.io
-            mkdir -p /etc/docker/certs.d/registry-1.docker.io
-            mkdir -p /etc/docker/certs.d/index.docker.io
-            mkdir -p /etc/docker/certs.d/auth.docker.io
-            
-            # Copy system certificates to Docker certificate directories
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/registry.docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/registry-1.docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/index.docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/auth.docker.io/ca.crt
-            
-            # Configure Docker daemon for secure registry access
-            DOCKER_CONFIG_DIR=\"/etc/docker\"
-            DOCKER_CONFIG_FILE=\"\$DOCKER_CONFIG_DIR/daemon.json\"
-            
-            if [ ! -f \"\$DOCKER_CONFIG_FILE\" ]; then
-                echo '{
-  \"insecure-registries\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"],
-  \"allow-nondistributable-artifacts\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"],
-  \"dns\": [\"8.8.8.8\", \"8.8.4.4\"],
-  \"registry-mirrors\": [\"https://mirror.gcr.io\", \"https://docker-mirror.example.com\", \"https://registry-mirror.example.com\"]
-}' > \"\$DOCKER_CONFIG_FILE\"
+    # Fix permissions in .cargo directory if it exists
+    if [ -d ".cargo" ]; then
+        echo -e "${BLUE}[*] Ensuring .cargo directory has correct permissions...${NC}"
+        if [ "$(stat -c '%U' .cargo)" != "$(whoami)" ]; then
+            echo -e "${YELLOW}[!] .cargo directory has incorrect ownership, fixing...${NC}"
+            if sudo chown -R "$(whoami):$(whoami)" .cargo; then
+                echo -e "${GREEN}[+] .cargo directory permissions fixed${NC}"
             else
-                # Use grep to check if already configured
-                if ! grep -q \"insecure-registries\" \"\$DOCKER_CONFIG_FILE\"; then
-                    # Backup original file
-                    cp \"\$DOCKER_CONFIG_FILE\" \"\$DOCKER_CONFIG_FILE.bak\"
-                    
-                    # Simple addition to existing file if jq not available
-                    sed -i 's/}$/,\"insecure-registries\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"],\"allow-nondistributable-artifacts\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"]}/' \"\$DOCKER_CONFIG_FILE\" 
-                fi
+                echo -e "${RED}[!] Failed to fix .cargo directory permissions${NC}"
             fi
-            
-            # Add Docker registry entries to /etc/hosts if needed
-            if ! grep -q \"registry-1.docker.io\" /etc/hosts; then
-                echo \"# Docker registry hosts for certificate handling\" >> /etc/hosts
-                echo \"44.194.136.173  registry-1.docker.io\" >> /etc/hosts
-                echo \"3.213.10.128    auth.docker.io\" >> /etc/hosts
-            fi
-            
-            # Restart Docker service
-            echo \"Restarting Docker service...\"
-            systemctl restart docker
-            
-            # Fix permissions for Docker socket
-            echo \"Setting Docker socket permissions...\"
-            chmod 666 /var/run/docker.sock
-        "
-        echo -e "${GREEN}[+] Docker certificate fixes applied${NC}"
+        fi
     fi
-    
-    # Configure Docker client to ignore certificate issues
-    echo -e "${BLUE}[*] Configuring Docker client...${NC}"
-    
-    # Remove any existing Docker client configuration that might be causing issues
-    rm -f "${HOME}/.docker/ca.pem" "${HOME}/.docker/cert.pem" "${HOME}/.docker/key.pem" 2>/dev/null
-    
-    # Create Docker config directory if it doesn't exist
-    mkdir -p "${HOME}/.docker"
-    
-    # Set up Docker client config to use plain HTTP and disable TLS verification
-    echo '{
-  "auths": {},
-  "experimental": "enabled",
-  "debug": true
-}' > "${HOME}/.docker/config.json"
-    
-    # Unset any Docker TLS environment variables that might interfere
-    unset DOCKER_CERT_PATH DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_TLSCACERT DOCKER_TLSCERT DOCKER_TLSKEY
-    
-    # Set Docker host to use Unix socket
-    export DOCKER_HOST="unix:///var/run/docker.sock"
-}
-
-# Function to set environment variables for build
-set_env_vars() {
-    echo -e "${BLUE}[*] Setting environment variables for build...${NC}"
-    
-    # SSL/TLS related variables
-    export CARGO_HTTP_CHECK_REVOKE=false
-    export CARGO_NET_GIT_FETCH_WITH_CLI=true
-    
-    # Build-related variables
-    export CARGO_HTTP_DEBUG=true
-    export CARGO_NET_RETRY=10
-    
-    # Set RUSTFLAGS based on build type
-    if [ "$BUILD_TYPE" = "release" ]; then
-        # Release mode: optimize for size and performance
-        export RUSTFLAGS_BASE="-C opt-level=3 -C codegen-units=1 -C target-cpu=native"
-        export RUSTFLAGS="$RUSTFLAGS_BASE -C panic=abort"
-    else
-        # Debug mode: include debug symbols and checks
-        export RUSTFLAGS_BASE="-C debuginfo=2 -D warnings"
-        export RUSTFLAGS="$RUSTFLAGS_BASE"
-    fi
-    
-    echo -e "${GREEN}[+] Environment variables set${NC}"
 }
 
 # Function to clean artifacts
@@ -312,35 +152,26 @@ clean_artifacts() {
     return 0
 }
 
-# Function to build the project
+# Function to build the project using standard cargo
 build_project() {
-    echo -e "${BLUE}[*] Building project in ${YELLOW}$BUILD_TYPE${NC} mode...${NC}"
+    echo -e "${BLUE}[*] Building project in release mode...${NC}"
     
-    # Set cargo flags for build type
-    local cargo_flags=""
-    if [ "$BUILD_TYPE" = "release" ]; then
-        cargo_flags="--release"
+    # Ensure libpcap-dev is installed
+    if ! dpkg -l | grep -q libpcap-dev; then
+        echo -e "${YELLOW}[!] libpcap-dev not found, installing...${NC}"
+        sudo apt-get update
+        sudo apt-get install -y libpcap-dev
     fi
     
     # Run the build
-    if cargo build $cargo_flags; then
+    if cargo build --release; then
         echo -e "${GREEN}[+] Build completed successfully${NC}"
+        cp target/release/quantum_scanner ./quantum_scanner
+        chmod +x ./quantum_scanner
         return 0
     else
         echo -e "${RED}[!] Build failed${NC}"
-        echo -e "${YELLOW}[!] Trying alternative build approach...${NC}"
-        
-        # If build fails, try with system CA certificates
-        export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-        export SSL_CERT_DIR=/etc/ssl/certs
-        
-        if cargo build $cargo_flags; then
-            echo -e "${GREEN}[+] Build with system CA certificates succeeded${NC}"
-            return 0
-        else
-            echo -e "${RED}[!] All build attempts failed${NC}"
-            return 1
-        fi
+        return 1
     fi
 }
 
@@ -350,130 +181,35 @@ build_static() {
     
     # Check if Docker is installed
     if ! command -v docker &> /dev/null; then
-        echo -e "${RED}[!] Docker is not installed. Please install Docker to use static build.${NC}"
-        echo -e "${YELLOW}[!] Falling back to local build method...${NC}"
-        build_static_local
+        echo -e "${RED}[!] Docker is not installed, falling back to direct musl build.${NC}"
+        build_static_directly
         return $?
     fi
     
-    # === BEGIN DOCKER CERTIFICATE FIXES ===
-    # This section handles common certificate issues with Docker on Kali Linux and similar distributions
-    echo -e "${BLUE}[*] Applying Docker certificate fixes...${NC}"
+    # Fix Docker certificate issue
+    echo -e "${BLUE}[*] Setting up Docker environment...${NC}"
+    mkdir -p $HOME/.docker
+    # Use simple config without certificates
+    echo '{"auths":{}}' > $HOME/.docker/config.json
     
-    # Check if running as root and ask for sudo if needed
-    if [ "$EUID" -ne 0 ]; then
-        echo -e "${YELLOW}[!] Docker certificate fixes require root privileges${NC}"
-        echo -e "${YELLOW}[!] Re-running with sudo for certificate fixes only...${NC}"
-        
-        # Execute just the certificate fixing part with sudo
-        sudo bash -c "
-            # Create Docker certificate directories
-            mkdir -p /etc/docker/certs.d/docker.io
-            mkdir -p /etc/docker/certs.d/registry.docker.io
-            mkdir -p /etc/docker/certs.d/registry-1.docker.io
-            mkdir -p /etc/docker/certs.d/index.docker.io
-            mkdir -p /etc/docker/certs.d/auth.docker.io
-            
-            # Copy system certificates to Docker certificate directories
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/registry.docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/registry-1.docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/index.docker.io/ca.crt
-            cp /etc/ssl/certs/ca-certificates.crt /etc/docker/certs.d/auth.docker.io/ca.crt
-            
-            # Configure Docker daemon for secure registry access
-            DOCKER_CONFIG_DIR=\"/etc/docker\"
-            DOCKER_CONFIG_FILE=\"\$DOCKER_CONFIG_DIR/daemon.json\"
-            
-            if [ ! -f \"\$DOCKER_CONFIG_FILE\" ]; then
-                echo '{
-  \"insecure-registries\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"],
-  \"allow-nondistributable-artifacts\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"],
-  \"dns\": [\"8.8.8.8\", \"8.8.4.4\"],
-  \"registry-mirrors\": [\"https://mirror.gcr.io\", \"https://docker-mirror.example.com\", \"https://registry-mirror.example.com\"]
-}' > \"\$DOCKER_CONFIG_FILE\"
-            else
-                # Use grep to check if already configured
-                if ! grep -q \"insecure-registries\" \"\$DOCKER_CONFIG_FILE\"; then
-                    # Backup original file
-                    cp \"\$DOCKER_CONFIG_FILE\" \"\$DOCKER_CONFIG_FILE.bak\"
-                    
-                    # Simple addition to existing file if jq not available
-                    sed -i 's/}$/,\"insecure-registries\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"],\"allow-nondistributable-artifacts\": [\"docker.io\", \"registry.docker.io\", \"registry-1.docker.io\", \"index.docker.io\"]}/' \"\$DOCKER_CONFIG_FILE\" 
-                fi
-            fi
-            
-            # Add Docker registry entries to /etc/hosts if needed
-            if ! grep -q \"registry-1.docker.io\" /etc/hosts; then
-                echo \"# Docker registry hosts for certificate handling\" >> /etc/hosts
-                echo \"44.194.136.173  registry-1.docker.io\" >> /etc/hosts
-                echo \"3.213.10.128    auth.docker.io\" >> /etc/hosts
-            fi
-            
-            # Restart Docker service
-            echo \"Restarting Docker service...\"
-            systemctl restart docker
-            
-            # Fix permissions for Docker socket
-            echo \"Setting Docker socket permissions...\"
-            chmod 666 /var/run/docker.sock
-        "
-        echo -e "${GREEN}[+] Docker certificate fixes applied${NC}"
+    # Try to ensure Docker socket has right permissions
+    if [ ! -w "/var/run/docker.sock" ]; then
+        echo -e "${YELLOW}[!] Docker socket needs permission fix, requires sudo...${NC}"
+        sudo chmod 666 /var/run/docker.sock || true
     fi
-    # === END DOCKER CERTIFICATE FIXES ===
     
-    # Verify Docker is working
-    echo -e "${BLUE}[*] Verifying Docker connection...${NC}"
-    if ! docker info > /dev/null 2>&1; then
-        echo -e "${RED}[!] Docker is not responding, falling back to local build${NC}"
-        build_static_local
+    # Test if Docker works
+    if ! docker info &>/dev/null; then
+        echo -e "${YELLOW}[!] Docker appears to have issues, falling back to direct musl build.${NC}"
+        build_static_directly
         return $?
     fi
     
-    # Check if we can connect to Docker Hub
-    echo -e "${BLUE}[*] Testing connection to Docker Hub...${NC}"
-    if ! docker pull hello-world > /dev/null 2>&1; then
-        echo -e "${YELLOW}[!] Cannot connect to Docker Hub, falling back to local build${NC}"
-        build_static_local
-        return $?
-    fi
-    
-    # Generate a unique container name
-    CONTAINER_NAME="quantum_scanner_build_$(date +%s)"
-    
-    # Configure Docker to use plain HTTP without client certificates
-    echo -e "${BLUE}[*] Configuring Docker client...${NC}"
-    
-    # Remove any existing Docker client configuration that might be causing issues
-    rm -f "${HOME}/.docker/ca.pem" "${HOME}/.docker/cert.pem" "${HOME}/.docker/key.pem" 2>/dev/null
-    
-    # Create Docker config directory if it doesn't exist
-    mkdir -p "${HOME}/.docker"
-    
-    # Set up Docker client config to use plain HTTP
-    echo '{
-  "auths": {},
-  "experimental": "enabled",
-  "debug": true
-}' > "${HOME}/.docker/config.json"
-    
-    # Use Docker context command if available to ensure we're using the default context
-    if command -v docker context &> /dev/null; then
-        echo -e "${BLUE}[*] Setting Docker context to default...${NC}"
-        docker context use default 2>/dev/null || echo -e "${YELLOW}[!] Could not set Docker context, continuing...${NC}"
-    fi
-    
-    # Unset any Docker TLS environment variables that might interfere
-    unset DOCKER_CERT_PATH DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_TLSCACERT DOCKER_TLSCERT DOCKER_TLSKEY
-    
-    # Set Docker host to use Unix socket
-    export DOCKER_HOST="unix:///var/run/docker.sock"
-    
-    # Create a simpler Dockerfile for network-challenged environments
-    echo -e "${BLUE}[*] Creating simplified Dockerfile for network issues...${NC}"
-    cat > Dockerfile.offline << 'EOF'
-# Simplified Dockerfile for network-challenged environments
-FROM debian:bookworm-slim AS builder
+    # Create simplified Dockerfile for the build
+    echo -e "${BLUE}[*] Creating Dockerfile for static build...${NC}"
+    cat > Dockerfile.static << 'EOF'
+# Use a Debian-based image for building
+FROM debian:bullseye-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -481,12 +217,16 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     pkg-config \
     libssl-dev \
+    libpcap-dev \
     musl-tools \
-    cmake
+    git
 
-# Install Rust using local script
-RUN curl --insecure -sSf https://sh.rustup.rs | sh -s -- -y
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Add musl target
+RUN rustup target add x86_64-unknown-linux-musl
 
 # Create build directory
 WORKDIR /build
@@ -494,276 +234,112 @@ WORKDIR /build
 # Copy source code
 COPY . .
 
-# Build statically linked executable using musl
-RUN rustup target add x86_64-unknown-linux-musl
-ENV CC_x86_64_unknown_linux_musl=musl-gcc
+# Build statically linked executable
 RUN RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl
 
-# Strip binary to reduce size
+# Strip binary
 RUN strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner
 
-# Minimal image
+# Final stage - create minimal output image
 FROM scratch
 COPY --from=builder /build/target/x86_64-unknown-linux-musl/release/quantum_scanner /quantum_scanner
 ENTRYPOINT ["/quantum_scanner"]
 EOF
     
-    # Try to use existing images or pull if needed
-    echo -e "${BLUE}[*] Checking for existing Docker images...${NC}"
-    if docker images | grep -q "rust" || docker images | grep -q "debian"; then
-        echo -e "${GREEN}[+] Found existing images to use${NC}"
-    else
-        echo -e "${BLUE}[*] Attempting to pull images...${NC}"
-        # Try multiple ways to pull an image
-        docker pull rust:slim || \
-        docker pull debian:bookworm-slim || \
-        docker pull debian:stable-slim || \
-        docker pull ubuntu:latest || \
-        echo -e "${YELLOW}[!] All pull attempts failed, will try to use local images${NC}"
-    fi
-    
-    # Try to use a Rust image if available, otherwise use the offline approach
-    echo -e "${BLUE}[*] Building with Docker...${NC}"
-    if docker images | grep -q "rust"; then
-        echo -e "${GREEN}[+] Using available Rust image${NC}"
-        docker build \
-            --network=host \
-            --no-cache \
-            --build-arg ENABLE_UPX=$COMPRESS_BINARY \
-            --build-arg ULTRA_MINIMAL=$ULTRA_MINIMAL \
-            -t quantum_scanner_static_build .
-    else
-        echo -e "${YELLOW}[!] Using offline build approach with Debian/Ubuntu base${NC}"
-        docker build \
-            --network=host \
-            --no-cache \
-            -f Dockerfile.offline \
-            -t quantum_scanner_static_build .
-    fi
-    
-    # Extract the binary if build succeeded
-    if [ $? -eq 0 ]; then
-        echo -e "${BLUE}[*] Extracting binary from container...${NC}"
-        docker create --name "$CONTAINER_NAME" quantum_scanner_static_build
-        docker cp "$CONTAINER_NAME:/usr/local/bin/quantum_scanner" . 
-        docker rm "$CONTAINER_NAME"
-    else
-        echo -e "${RED}[!] Docker build failed, falling back to local build${NC}"
-        build_static_local
+    # Build the Docker image
+    echo -e "${BLUE}[*] Building Docker image...${NC}"
+    if ! docker build -t quantum_scanner_static -f Dockerfile.static .; then
+        echo -e "${RED}[!] Docker build failed, falling back to direct musl build.${NC}"
+        build_static_directly
         return $?
     fi
     
-    if [ -f "quantum_scanner" ]; then
-        chmod +x ./quantum_scanner
-        echo -e "${GREEN}[+] Static binary built successfully: ./quantum_scanner${NC}"
-        
-        # Show binary size
-        BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
-        echo -e "${GREEN}[+] Final static binary size: ${YELLOW}$BIN_SIZE${NC}"
-        return 0
-    else
-        echo -e "${RED}[!] Failed to build static binary with Docker, falling back to local build${NC}"
-        build_static_local
-        return $?
+    # Extract the binary from the image
+    echo -e "${BLUE}[*] Extracting static binary...${NC}"
+    
+    # Create a container from the image
+    CONTAINER_ID=$(docker create quantum_scanner_static)
+    
+    # Copy the binary from the container
+    docker cp "$CONTAINER_ID":/quantum_scanner ./quantum_scanner
+    
+    # Remove the container
+    docker rm "$CONTAINER_ID" > /dev/null
+    
+    # Make the binary executable
+    chmod +x ./quantum_scanner
+    
+    # Verify the binary
+    echo -e "${BLUE}[*] Verifying static binary...${NC}"
+    if command -v ldd &> /dev/null; then
+        LDD_OUTPUT=$(ldd ./quantum_scanner 2>&1)
+        if [[ "$LDD_OUTPUT" == *"not a dynamic executable"* ]]; then
+            echo -e "${GREEN}[+] Successfully built static binary${NC}"
+        else
+            echo -e "${YELLOW}[!] Warning: Binary may not be fully static${NC}"
+        fi
     fi
+    
+    # Show binary size
+    BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
+    echo -e "${GREEN}[+] Final static binary size: ${YELLOW}$BIN_SIZE${NC}"
+    
+    return 0
 }
 
-# Function to build static binary locally (fallback method)
-build_static_local() {
-    echo -e "${BLUE}[*] Building portable binary with enhanced static linking...${NC}"
+# Function to build static binary directly without Docker
+build_static_directly() {
+    echo -e "${BLUE}[*] Building static binary with musl...${NC}"
     
-    # Check if build-essential is installed
-    if ! command -v gcc &> /dev/null; then
-        echo -e "${YELLOW}[!] build-essential not found, installing...${NC}"
-        sudo apt-get update --allow-releaseinfo-change || echo -e "${YELLOW}[!] Ignoring APT update errors, proceeding with install...${NC}"
-        sudo apt-get install -y build-essential pkg-config libssl-dev
-    fi
-    
-    # Check if cargo is available
-    if ! command -v cargo &> /dev/null; then
-        echo -e "${RED}[!] cargo not found, please install Rust manually${NC}"
-        echo -e "${YELLOW}[!] Run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${NC}"
-        return 1
-    fi
-    
-    # Source the cargo environment to ensure rustup/cargo are in PATH
-    echo -e "${BLUE}[*] Ensuring Rust environment is loaded...${NC}"
-    source "$HOME/.cargo/env" || source "/root/.cargo/env" || echo -e "${YELLOW}[!] Could not source cargo env, assuming rustup is in PATH${NC}"
-    
-    # First approach: Try hybrid-static approach with explicit target (improved to handle proc-macro issue)
-    echo -e "${BLUE}[*] Attempting enhanced static build (approach 1)...${NC}"
-    if RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-gnu; then
-        echo -e "${GREEN}[+] Hybrid static build succeeded!${NC}"
-        
-        # Verify it's statically linked with ldd
-        echo -e "${BLUE}[*] Verifying static linking...${NC}"
-        if ldd target/x86_64-unknown-linux-gnu/release/quantum_scanner | grep -q "not a dynamic executable"; then
-            echo -e "${GREEN}[+] Verified as statically linked${NC}"
-        else
-            echo -e "${YELLOW}[!] Binary has some dynamic dependencies${NC}"
-            ldd target/x86_64-unknown-linux-gnu/release/quantum_scanner | grep -v "not a dynamic executable" || true
-        fi
-        
-        # Strip the binary if requested
-        if [ "$STRIP_BINARY" = true ]; then
-            echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
-            strip -s target/x86_64-unknown-linux-gnu/release/quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
-        fi
-        
-        # Copy to root directory
-        cp target/x86_64-unknown-linux-gnu/release/quantum_scanner ./quantum_scanner
-        chmod +x ./quantum_scanner
-        
-        # Show binary size
-        BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
-        echo -e "${GREEN}[+] Final binary size: ${YELLOW}$BIN_SIZE${NC}"
-        return 0
-    else
-        echo -e "${YELLOW}[!] Hybrid static approach failed, trying musl as fallback...${NC}"
-    fi
-    
-    # Second approach: Try using musl for a fully static binary
-    # Check if musl-tools are installed
+    # Ensure required tools are installed
     if ! command -v musl-gcc &> /dev/null; then
-        echo -e "${YELLOW}[!] musl-tools not found, installing...${NC}"
-        sudo apt-get update --allow-releaseinfo-change || echo -e "${YELLOW}[!] Ignoring APT update errors, proceeding with install...${NC}"
-        sudo apt-get install -y musl-tools build-essential
+        echo -e "${YELLOW}[!] Installing musl-tools...${NC}"
+        sudo apt-get update
+        sudo apt-get install -y musl-tools musl-dev
     fi
     
-    # Add musl target
-    echo -e "${BLUE}[*] Adding musl target via rustup...${NC}"
-    if ! rustup target add x86_64-unknown-linux-musl; then
-        echo -e "${RED}[!] Failed to add musl target using rustup.${NC}"
-        echo -e "${YELLOW}[!] Please ensure rustup is installed and working correctly.${NC}"
+    # Add musl target if needed
+    echo -e "${BLUE}[*] Ensuring musl target is available...${NC}"
+    rustup target add x86_64-unknown-linux-musl
+    
+    # Build with musl target
+    echo -e "${BLUE}[*] Building with musl target...${NC}"
+    if ! RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --target=x86_64-unknown-linux-musl; then
+        echo -e "${RED}[!] Static build failed${NC}"
         return 1
     fi
     
-    # Try build with safer musl flags for better compatibility
-    echo -e "${BLUE}[*] Building with enhanced musl flags for better compatibility...${NC}"
+    # Copy binary to root directory
+    echo -e "${BLUE}[*] Copying binary to project root...${NC}"
+    cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
+    chmod +x ./quantum_scanner
     
-    # Create cargo config directory
-    mkdir -p .cargo
-    
-    # Set environment variables to bypass SSL verification
-    export CARGO_HTTP_CHECK_REVOKE=false
-    export CARGO_NET_GIT_FETCH_WITH_CLI=true
-    export CARGO_HTTP_DEBUG=true
-    export CARGO_NET_RETRY=10
-    export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-    export SSL_CERT_DIR=/etc/ssl/certs
-    
-    # Try the build with musl and environmental bypasses (note: no LTO=thin flag which can cause issues)
-    if RUSTFLAGS="-C target-feature=+crt-static -C opt-level=s" cargo build --release --target=x86_64-unknown-linux-musl; then
-        echo -e "${GREEN}[+] Enhanced musl build completed successfully${NC}"
-        
-        # Strip the binary if it exists
-        if [ "$STRIP_BINARY" = true ]; then
-            echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
-            if [ -f "target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then
-                strip -s target/x86_64-unknown-linux-musl/release/quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
-            fi
-        fi
-        
-        # Copy to root directory
-        cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
-        chmod +x ./quantum_scanner
-        
-        # Show binary size
-        BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
-        echo -e "${GREEN}[+] Final binary size: ${YELLOW}$BIN_SIZE${NC}"
-        return 0
-    else
-        echo -e "${RED}[!] Enhanced musl build failed, trying last-resort options...${NC}"
-        
-        # Try one last build approach with absolute minimal features
-        if RUSTFLAGS="-C prefer-dynamic=no -C target-feature=+crt-static -C codegen-units=1" cargo build --release; then
-            echo -e "${GREEN}[+] Last-resort build succeeded${NC}"
-            
-            # Copy to root directory
-            cp target/release/quantum_scanner ./quantum_scanner
-            chmod +x ./quantum_scanner
-            
-            # Show binary size
-            BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
-            echo -e "${GREEN}[+] Final binary size: ${YELLOW}$BIN_SIZE${NC}"
-            
-            # Warning about static linking
-            echo -e "${YELLOW}[!] This build may not be fully static but should be more portable${NC}"
-            return 0
+    # Verify the binary
+    echo -e "${BLUE}[*] Verifying static binary...${NC}"
+    if command -v ldd &> /dev/null; then
+        LDD_OUTPUT=$(ldd ./quantum_scanner 2>&1)
+        if [[ "$LDD_OUTPUT" == *"not a dynamic executable"* ]]; then
+            echo -e "${GREEN}[+] Successfully built static binary${NC}"
         else
-            echo -e "${RED}[!] All static build approaches failed${NC}"
-            echo -e "${YELLOW}[!] Falling back to standard dynamic build${NC}"
-            
-            # Last resort: Just do a regular build
-            if cargo build --release; then
-                cp target/release/quantum_scanner ./quantum_scanner
-                chmod +x ./quantum_scanner
-                echo -e "${YELLOW}[!] Created dynamic binary instead${NC}"
-                return 0
-            else
-                return 1
-            fi
+            echo -e "${YELLOW}[!] Warning: Binary may not be fully static${NC}"
         fi
     fi
+    
+    # Show binary size
+    BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
+    echo -e "${GREEN}[+] Final static binary size: ${YELLOW}$BIN_SIZE${NC}"
+    
+    return 0
 }
 
 # Function to apply binary hardening
 apply_binary_hardening() {
-    # Get binary path based on build type and actual binary location
-    if [ -f "./quantum_scanner" ]; then
-        BINARY_PATH="./quantum_scanner"
-    elif [ "$FULLY_STATIC" = true ] && [ -f "./target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then
-        BINARY_PATH="./target/x86_64-unknown-linux-musl/release/quantum_scanner"
-    elif [ "$STATIC_BUILD" = true ]; then
-        # Check musl target first
-        if [ -f "./target/x86_64-unknown-linux-musl/release/quantum_scanner" ]; then
-            BINARY_PATH="./target/x86_64-unknown-linux-musl/release/quantum_scanner"
-        # Then check x86_64-unknown-linux-gnu target
-        elif [ -f "./target/x86_64-unknown-linux-gnu/release/quantum_scanner" ]; then
-            BINARY_PATH="./target/x86_64-unknown-linux-gnu/release/quantum_scanner"
-        # Finally check regular release path
-        elif [ -f "./target/release/quantum_scanner" ]; then
-            BINARY_PATH="./target/release/quantum_scanner"
-        else
-            echo -e "${RED}[!] Binary not found. Build may have failed.${NC}"
-            return 1
-        fi
-    elif [ "$BUILD_TYPE" = "release" ]; then
-        if [ -f "./target/release/quantum_scanner" ]; then
-            BINARY_PATH="./target/release/quantum_scanner"
-        else
-            echo -e "${RED}[!] Binary not found at ./target/release/quantum_scanner. Build may have failed.${NC}"
-            return 1
-        fi
-    else
-        if [ -f "./target/debug/quantum_scanner" ]; then
-            BINARY_PATH="./target/debug/quantum_scanner"
-        else
-            echo -e "${RED}[!] Binary not found at ./target/debug/quantum_scanner. Build may have failed.${NC}"
-            return 1
-        fi
-    fi
-    
-    # Check if binary exists one last time (redundant but safe check)
-    if [ ! -f "$BINARY_PATH" ]; then
-        echo -e "${RED}[!] Binary not found at $BINARY_PATH. Build may have failed.${NC}"
-        if [ -f "./quantum_scanner" ]; then
-            echo -e "${GREEN}[+] However, a binary was found at ./quantum_scanner. Using that instead.${NC}"
-            BINARY_PATH="./quantum_scanner"
-        else
-            return 1
-        fi
-    fi
-    
     echo -e "${BLUE}[*] Applying binary hardening...${NC}"
     
-    # Strip binary if enabled and not already stripped
+    # Strip binary if enabled
     if [ "$STRIP_BINARY" = true ]; then
-        # Only strip if not already at root (which would have been stripped earlier)
-        if [ "$BINARY_PATH" != "./quantum_scanner" ]; then
-            echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
-            strip -s "$BINARY_PATH" 2>/dev/null || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
-        fi
+        echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
+        strip -s ./quantum_scanner || echo -e "${YELLOW}[!] Stripping failed, continuing...${NC}"
     fi
     
     # Apply UPX compression if enabled
@@ -773,131 +349,18 @@ apply_binary_hardening() {
             
             if [ "$ULTRA_MINIMAL" = true ]; then
                 echo -e "${YELLOW}[!] Using extreme compression (slows startup time)...${NC}"
-                upx --no-backup --brute "$BINARY_PATH" || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
+                upx --no-backup --brute ./quantum_scanner || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
             else
-                upx --no-backup "$BINARY_PATH" || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
+                upx --no-backup ./quantum_scanner || echo -e "${YELLOW}[!] UPX compression failed, continuing...${NC}"
             fi
         else
             echo -e "${YELLOW}[!] UPX not found, skipping compression. Install UPX with: sudo apt install upx${NC}"
         fi
     fi
     
-    # Copy binary to root directory for convenience if not already there
-    if [ "$BINARY_PATH" != "./quantum_scanner" ]; then
-        cp "$BINARY_PATH" ./quantum_scanner
-        echo -e "${GREEN}[+] Binary copied to ./quantum_scanner${NC}"
-    fi
-    
     # Show final binary size
     BIN_SIZE=$(du -h ./quantum_scanner | cut -f1)
     echo -e "${GREEN}[+] Final binary size: ${YELLOW}$BIN_SIZE${NC}"
-}
-
-# Function to build a fully static binary using clux/muslrust Docker container
-build_fully_static() {
-    echo -e "${BLUE}[*] Building fully static binary with clux/muslrust...${NC}"
-    
-    # Test Docker connection
-    echo -e "${BLUE}[*] Testing Docker connection...${NC}"
-    if ! docker info > /dev/null 2>&1; then
-        echo -e "${RED}[!] Docker is not responding. Attempting to fix...${NC}"
-        fix_docker_certs
-        
-        # Test again after fix
-        if ! docker info > /dev/null 2>&1; then
-            echo -e "${RED}[!] Docker is still not responding. Falling back to local build...${NC}"
-            build_static_local
-            return $?
-        fi
-    fi
-    
-    # Pull the muslrust image with certificate bypass
-    echo -e "${BLUE}[*] Pulling clux/muslrust image...${NC}"
-    if ! docker pull clux/muslrust:stable; then
-        echo -e "${YELLOW}[!] Failed to pull Docker image due to certificate issues. Applying fixes...${NC}"
-        fix_docker_certs
-        
-        # Try pulling again with modified Docker config
-        if ! docker pull clux/muslrust:stable; then
-            echo -e "${RED}[!] Still can't pull Docker image. Falling back to local build...${NC}"
-            build_static_local
-            return $?
-        fi
-    fi
-    
-    # Create a Docker volume to persist the cargo registry and avoid redownloading dependencies
-    echo -e "${BLUE}[*] Creating Docker volume for cargo registry...${NC}"
-    docker volume create cargo-registry >/dev/null
-    
-    # Run the build in the container
-    echo -e "${BLUE}[*] Building fully static binary in Docker...${NC}"
-    docker run \
-        -v $PWD:/volume \
-        -v cargo-registry:/root/.cargo/registry \
-        --env CARGO_HTTP_CHECK_REVOKE=false \
-        --env CARGO_NET_GIT_FETCH_WITH_CLI=true \
-        --env CARGO_HTTP_DEBUG=true \
-        --env CARGO_NET_RETRY=10 \
-        --rm -t clux/muslrust:stable \
-        bash -c "cd /volume && RUSTFLAGS='-C target-feature=+crt-static -C link-self-contained=yes' cargo build --release --target x86_64-unknown-linux-musl"
-    
-    BUILD_STATUS=$?
-    if [ $BUILD_STATUS -ne 0 ]; then
-        echo -e "${RED}[!] Build failed with exit code ${BUILD_STATUS}${NC}"
-        echo -e "${YELLOW}[!] Falling back to local build method...${NC}"
-        build_static_local
-        return $?
-    fi
-    
-    # Copy the binary to the root directory
-    echo -e "${BLUE}[*] Copying static binary to project root...${NC}"
-    cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
-    chmod +x ./quantum_scanner
-    
-    return 0
-}
-
-# Function to verify if the binary is truly static
-verify_static() {
-    echo -e "${BLUE}[*] Verifying that the binary is fully static...${NC}"
-    
-    if [ ! -f "./quantum_scanner" ]; then
-        echo -e "${RED}[!] Binary not found at ./quantum_scanner${NC}"
-        return 1
-    fi
-    
-    # Check file size
-    SIZE=$(du -h ./quantum_scanner | cut -f1)
-    echo -e "${GREEN}[+] Binary size: ${YELLOW}${SIZE}${NC}"
-    
-    # Use ldd to check for dependencies
-    if command -v ldd &> /dev/null; then
-        LDD_OUTPUT=$(ldd ./quantum_scanner 2>&1)
-        if [[ "$LDD_OUTPUT" == *"not a dynamic executable"* ]]; then
-            echo -e "${GREEN}[+] VERIFIED: Binary is 100% static with zero dynamic dependencies${NC}"
-        else
-            echo -e "${YELLOW}[!] WARNING: Binary has some dynamic dependencies:${NC}"
-            echo "$LDD_OUTPUT"
-        fi
-    else
-        echo -e "${YELLOW}[!] 'ldd' not found, cannot verify if binary is fully static${NC}"
-    fi
-    
-    # Use file command if available
-    if command -v file &> /dev/null; then
-        FILE_OUTPUT=$(file ./quantum_scanner)
-        echo -e "${BLUE}[*] File type information: ${NC}"
-        echo -e "${YELLOW}$FILE_OUTPUT${NC}"
-        
-        if [[ "$FILE_OUTPUT" == *"statically linked"* ]]; then
-            echo -e "${GREEN}[+] File utility confirms: statically linked${NC}"
-        else
-            echo -e "${RED}[!] File utility does not confirm static linking${NC}"
-        fi
-    fi
-    
-    echo -e "${GREEN}[+] Static binary verification complete${NC}"
-    return 0
 }
 
 # Main function
@@ -908,17 +371,8 @@ main() {
     # Parse command line arguments
     parse_args "$@"
     
-    # Create backup of Cargo.toml
-    backup_cargo_toml
-    
-    # Fix Cargo.toml if needed
-    fix_cargo_toml
-    
-    # Setup cargo config for SSL issues
-    setup_cargo_config
-    
-    # Set environment variables
-    set_env_vars
+    # Fix target directory permissions
+    fix_target_permissions
     
     # Clean artifacts if requested
     clean_artifacts
@@ -930,16 +384,8 @@ main() {
         exit 0
     fi
     
-    # Build the project
-    if [ "$FULLY_STATIC" = true ]; then
-        build_fully_static
-        if [ $? -eq 0 ]; then
-            verify_static
-        else
-            echo -e "${RED}[!] Fully static build failed${NC}"
-            exit 1
-        fi
-    elif [ "$STATIC_BUILD" = true ]; then
+    # Build the project based on options
+    if [ "$STATIC_BUILD" = true ]; then
         build_static
     else
         build_project
