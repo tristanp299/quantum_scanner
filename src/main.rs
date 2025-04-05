@@ -7,6 +7,7 @@ use rand::{thread_rng, Rng};
 use std::sync::Arc;
 use std::fs;
 use std::io::{Read, Write};
+use serde_json;
 
 mod scanner;
 mod models;
@@ -947,8 +948,13 @@ async fn main() -> Result<(), anyhow::Error> {
     println!("[{}+{}] Scan completed. Found {} open ports", 
         colors.green, colors.reset, results.open_ports.len());
     
-    // Display results with enhanced verbosity
-    if args.verbose {
+    // Display results based on output mode
+    if args.json {
+        // If JSON output is requested, serialize and display the results
+        let json_output = serde_json::to_string_pretty(&results)
+            .unwrap_or_else(|e| format!("Error serializing to JSON: {}", e));
+        println!("\n{}", json_output);
+    } else if args.verbose {
         // Display enhanced scan details using the print_results function
         output::print_results(&results)?;
     } else {
@@ -963,6 +969,16 @@ async fn main() -> Result<(), anyhow::Error> {
                 
                 println!("[{}OPEN{}] Port {}: {} ", 
                     colors.green, colors.reset, port, service_info);
+                
+                // Show banner information if available
+                if let Some(banner) = &result.banner {
+                    // Trim and show the first line of the banner for compact output
+                    let banner_preview = banner.lines().next()
+                        .unwrap_or("").trim();
+                    if !banner_preview.is_empty() {
+                        println!("       Banner: {}", banner_preview);
+                    }
+                }
                 
                 // Show condensed vulnerability count if present
                 if !result.vulns.is_empty() {
