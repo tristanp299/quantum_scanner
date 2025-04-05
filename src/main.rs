@@ -136,7 +136,7 @@ struct Args {
     _log_password: Option<String>,
     
     /// Enable enhanced evasion techniques
-    #[clap(short = 'E', long, default_value_t = true, help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol-specific mimicry, banner grabbing suppression, sophisticated protocol variants)")]
+    #[clap(short = 'E', long, default_value_t = false, help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol-specific mimicry, banner grabbing suppression, sophisticated protocol variants)")]
     enhanced_evasion: bool,
     
     /// Operating system to mimic in enhanced evasion mode

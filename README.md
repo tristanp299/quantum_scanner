@@ -170,7 +170,7 @@ Here's a list of all available command options and their descriptions:
 
 #### Evasion Techniques
 - `-e, --evasion` - Enable basic evasion techniques
-- `-E, --enhanced-evasion` - Enable advanced evasion techniques (default: true)
+- `-E, --enhanced-evasion` - Enable advanced evasion techniques (default: false) - disables banner grabbing to reduce detection footprint
 - `--mimic-os <OS>` - OS to mimic in enhanced evasion (default: random)
 - `--ttl-jitter <NUM>` - TTL jitter amount for enhanced evasion (1-5) (default: 2)
 - `--protocol-variant <VARIANT>` - Protocol variant for protocol mimicry
@@ -312,7 +312,7 @@ This mode is suitable for avoiding basic network monitoring tools but may still 
 
 #### Enhanced Evasion Mode (`-E`, `--enhanced-evasion`)
 
-When enhanced evasion is enabled (default: true), Quantum Scanner employs sophisticated techniques to minimize detection:
+When enhanced evasion is enabled (default: false), Quantum Scanner employs sophisticated techniques to minimize detection:
 
 - **Advanced OS Fingerprint Spoofing:** Precisely alters TTL, window sizes, and TCP options to mimic legitimate OS patterns for Windows, Linux, macOS, or Cisco devices.
 - **Dynamic TTL Jittering:** Intelligently varies TTL values using jittering algorithms to avoid consistent patterns that might trigger detection.
@@ -320,10 +320,10 @@ When enhanced evasion is enabled (default: true), Quantum Scanner employs sophis
 - **Advanced Timing Randomization:** Uses statistical models to vary packet timing in ways that mimic real user behavior.
 - **Variable Window Size Manipulation:** Dynamically adjusts window sizes to match target OS patterns.
 - **Sophisticated Protocol Variants:** Can mimic specific protocol versions (e.g., HTTP/1.1, TLS 1.2) to blend with expected traffic patterns.
-- **Banner Grabbing Suppression:** Disables banner grabbing operations to reduce additional network traffic that might trigger alerts.
+- **Banner Grabbing Suppression:** Completely disabled to reduce additional network traffic that would trigger detection systems.
 
 **Features Disabled in Enhanced Evasion Mode:**
-- **Banner Grabbing:** Automatically disabled to reduce additional network traffic that might trigger detection systems.
+- **Banner Grabbing:** Completely disabled to reduce additional network traffic that would trigger detection systems.
 - **Aggressive Service Detection:** Reduced to prevent generating patterns that could identify scanning activity.
 - **Sequential Scanning:** Replaced with more randomized patterns to avoid triggering threshold-based alerts.
 

@@ -648,8 +648,19 @@ impl QuantumScanner {
         
         // Perform further analysis on open ports
         for port in self.open_ports.iter().cloned().collect::<Vec<_>>() {
-            // Always perform banner grabbing regardless of evasion settings
-            // Banner grabbing is crucial for proper port analysis and fingerprinting
+            // Skip banner grabbing if enhanced evasion is enabled to reduce detection footprint
+            if self.enhanced_evasion {
+                info!("Banner grabbing skipped due to enhanced evasion mode");
+                self.memory_log("INFO", "Banner grabbing skipped due to enhanced evasion mode");
+                
+                // Try to identify the service based on port number alone when in enhanced evasion mode
+                if let Some(port_result) = self.results.get_mut(&port) {
+                    port_result.service = crate::models::CommonPorts::get_service(port).map(String::from);
+                }
+                continue;
+            }
+            
+            // Perform standard banner grabbing when enhanced evasion is disabled
             info!("Attempting banner grabbing on port {}", port);
             self.memory_log("INFO", &format!("Attempting banner grabbing on port {}", port));
             
@@ -658,7 +669,7 @@ impl QuantumScanner {
                 port,
                 Duration::from_secs_f64(self.timeout_banner)
             ).await {
-                let grabbed_banner = banner.clone(); // Clone the banner to avoid borrowing issues
+                let _grabbed_banner = banner.clone(); // Clone the banner to avoid borrowing issues
                 if let Some(port_result) = self.results.get_mut(&port) {
                     info!("Banner grabbed for port {}", port);
                     port_result.banner = Some(banner);
@@ -704,6 +715,11 @@ impl QuantumScanner {
             }
         }
         
+        // Get complete service categories from our categorize_services method
+        if let Some(categorized_services) = self.categorize_services() {
+            categories = categorized_services;
+        }
+        
         // Run detailed analysis on open ports
         if !self.open_ports.is_empty() {
             info!("Found {} open ports. Running detailed analysis...", self.open_ports.len());
@@ -734,7 +750,7 @@ impl QuantumScanner {
             packets_sent: *self.packets_sent.lock(),
             successful_scans: *self.successful_scans.lock(),
             os_summary: self.detect_os(),
-            risk_assessment: self.assess_risk(),
+            risk_assessment: self.generate_risk_assessment().or_else(|| self.assess_risk()),
             service_categories: if !categories.is_empty() { Some(categories) } else { None },
         };
         
