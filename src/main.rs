@@ -50,7 +50,7 @@ struct Args {
     rate: usize,
 
     /// Enable evasion techniques
-    #[clap(short, long, help = "Enable basic evasion techniques (packet timing randomization, TTL manipulation)")]
+    #[clap(short, long, help = "Enable basic evasion techniques (simple TTL manipulation, basic timing randomization, minimal TCP option adjustment, packet sequencing randomization)")]
     evasion: bool,
 
     /// Enable verbose output
@@ -135,7 +135,7 @@ struct Args {
     _log_password: Option<String>,
     
     /// Enable enhanced evasion techniques
-    #[clap(short = 'E', long, default_value_t = true, help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol mimicry)")]
+    #[clap(short = 'E', long, default_value_t = true, help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol-specific mimicry, banner grabbing suppression, sophisticated protocol variants)")]
     enhanced_evasion: bool,
     
     /// Operating system to mimic in enhanced evasion mode

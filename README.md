@@ -280,15 +280,34 @@ Quantum Scanner supports multiple scan techniques, each with different advantage
 - **Detection:** Modern security systems typically reassemble and inspect fragments.
 - **Best For:** Testing fragmentation handling or bypassing simple packet filters.
 
-### Enhanced Evasion Techniques
+### Evasion Techniques
 
-When `-E` (enhanced evasion) is enabled, Quantum Scanner employs sophisticated techniques to minimize detection:
+Quantum Scanner offers two levels of evasion capabilities:
 
-- **OS Fingerprint Spoofing:** Alters TTL, window sizes, and TCP options to mimic legitimate OS patterns.
-- **TTL Jittering:** Varies the TTL values slightly to avoid consistent patterns.
-- **Protocol Mimicry:** Makes traffic patterns resemble legitimate application protocols.
-- **Timing Randomization:** Varies packet timing to avoid statistical analysis.
-- **Window Size Manipulation:** Uses variable window sizes to mimic genuine traffic.
+#### Basic Evasion Mode (`-e`, `--evasion`)
+
+When basic evasion is enabled, the scanner employs fundamental techniques to reduce detection:
+
+- **Simple TTL Manipulation:** Uses common OS-specific TTL values to appear as normal traffic.
+- **Basic Timing Randomization:** Adds small random delays between packets to avoid predictable patterns.
+- **Minimal TCP Option Adjustment:** Modifies basic TCP options to avoid appearing as a scanner.
+- **Packet Sequencing Randomization:** Uses random sequence numbers for TCP packets.
+
+This mode is suitable for avoiding basic network monitoring tools but may still be detectable by sophisticated security systems.
+
+#### Enhanced Evasion Mode (`-E`, `--enhanced-evasion`)
+
+When enhanced evasion is enabled (default: true), Quantum Scanner employs sophisticated techniques to minimize detection:
+
+- **Advanced OS Fingerprint Spoofing:** Precisely alters TTL, window sizes, and TCP options to mimic legitimate OS patterns for Windows, Linux, macOS, or Cisco devices.
+- **Dynamic TTL Jittering:** Intelligently varies TTL values using jittering algorithms to avoid consistent patterns that might trigger detection.
+- **Protocol-Specific Mimicry:** Generates protocol-specific payloads (HTTP, HTTPS, SSH, FTP, etc.) that closely resemble legitimate application traffic, complete with appropriate headers and version information.
+- **Advanced Timing Randomization:** Uses statistical models to vary packet timing in ways that mimic real user behavior.
+- **Variable Window Size Manipulation:** Dynamically adjusts window sizes to match target OS patterns.
+- **Sophisticated Protocol Variants:** Can mimic specific protocol versions (e.g., HTTP/1.1, TLS 1.2) to blend with expected traffic patterns.
+- **Banner Grabbing Suppression:** Disables banner grabbing operations to reduce additional network traffic that might trigger alerts.
+
+Enhanced evasion mode is suitable for environments with advanced security monitoring and can effectively reduce the scanner's detection footprint.
 
 ### Memory-Only Mode
 
@@ -319,4 +338,4 @@ Refer to the `LICENSE` file for distribution and usage rights.
 
 ## **Disclaimer: Use Responsibly**
 
-**This tool is intended solely for authorized security testing and educational purposes.** Using Quantum Scanner against systems without explicit, written permission from the system owner is illegal and unethical. The developers assume no liability and are not responsible for any misuse or damage caused by this tool. **Always obtain proper authorization before conducting any scanning activity.** 
+**This tool is intended solely for authorized security testing and educational purposes.** Using Quantum Scanner against systems without explicit, written permission from the system owner is illegal and unethical. The developers assume no liability and are not responsible for any misuse or damage caused by this tool. **Always obtain proper authorization before conducting any scanning activity.**
