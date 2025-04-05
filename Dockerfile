@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev pkg-config musl-tools cmake libpcap-dev \
     build-essential binutils git ca-certificates \
     # Install UPX conditionally in the same layer to avoid duplication
-    $([ "$ENABLE_UPX" = "true" ] || [ "$ULTRA_MINIMAL" = "true" ] && echo "upx-ucl") \
+    $([ "$ENABLE_UPX" = "true" ] || [ "$ULTRA_MINIMAL" = "true" ] && echo "upx || upx-ucl") \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
     # Configure security settings in the same layer
@@ -49,9 +49,9 @@ RUN RUSTFLAGS="-C target-feature=+crt-static -C opt-level=2" \
     strip --strip-unneeded target/x86_64-unknown-linux-musl/release/quantum_scanner && \
     # Apply UPX if enabled (in the same layer)
     if [ "$ENABLE_UPX" = "true" ]; then \
-        upx --no-backup target/x86_64-unknown-linux-musl/release/quantum_scanner; \
+        which upx && upx --no-backup target/x86_64-unknown-linux-musl/release/quantum_scanner || echo "UPX not found, skipping compression"; \
     elif [ "$ULTRA_MINIMAL" = "true" ]; then \
-        upx --no-backup --lzma target/x86_64-unknown-linux-musl/release/quantum_scanner; \
+        which upx && upx --no-backup --lzma target/x86_64-unknown-linux-musl/release/quantum_scanner || echo "UPX not found, skipping compression"; \
     fi
 
 # Final minimal image
