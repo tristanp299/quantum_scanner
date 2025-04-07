@@ -17,6 +17,7 @@ NC='\033[0m' # No Color
 # Default configuration
 BYPASS_TLS_SECURITY=false
 TOOLCHAIN="stable"
+FORCE_REMOVE_SYSTEM_RUST=false
 
 # Function to display banner
 show_banner() {
@@ -47,14 +48,20 @@ parse_args() {
                 echo -e "${YELLOW}[!] Using beta toolchain${NC}"
                 shift
                 ;;
+            --force-remove)
+                FORCE_REMOVE_SYSTEM_RUST=true
+                echo -e "${YELLOW}[!] Will attempt to remove system Rust installation if detected${NC}"
+                shift
+                ;;
             --help|-h)
                 echo -e "${BLUE}Usage:${NC} $0 [options]"
                 echo ""
                 echo -e "${BLUE}Options:${NC}"
-                echo "  --insecure    Bypass TLS certificate verification (for proxy environments)"
-                echo "  --nightly     Use nightly toolchain instead of stable"
-                echo "  --beta        Use beta toolchain instead of stable"
-                echo "  -h, --help    Show this help message"
+                echo "  --insecure     Bypass TLS certificate verification (for proxy environments)"
+                echo "  --nightly      Use nightly toolchain instead of stable"
+                echo "  --beta         Use beta toolchain instead of stable"
+                echo "  --force-remove Remove system Rust installation if it conflicts with rustup"
+                echo "  -h, --help     Show this help message"
                 exit 0
                 ;;
             *)
@@ -106,8 +113,88 @@ EOF
     fi
 }
 
+# Function to check and handle system Rust installation
+check_system_rust() {
+    echo -e "${BLUE}[*] Checking for system Rust installation...${NC}"
+    
+    # Check if rustc is installed but not from rustup
+    if command -v rustc &> /dev/null && ! command -v rustup &> /dev/null; then
+        echo -e "${YELLOW}[!] System Rust installation detected${NC}"
+        
+        # Get system Rust version
+        RUST_VERSION=$(rustc --version 2>/dev/null || echo "Unknown")
+        echo -e "${YELLOW}[!] Current system Rust version: ${RUST_VERSION}${NC}"
+        
+        if [ "$FORCE_REMOVE_SYSTEM_RUST" = true ]; then
+            echo -e "${YELLOW}[!] Attempting to remove system Rust installation...${NC}"
+            
+            # Try to detect package manager and remove Rust
+            if command -v apt &> /dev/null; then
+                echo -e "${BLUE}[*] Removing Rust using apt...${NC}"
+                sudo apt remove -y rustc cargo rust-all rust-src rust-doc &>/dev/null || true
+            elif command -v dnf &> /dev/null; then
+                echo -e "${BLUE}[*] Removing Rust using dnf...${NC}"
+                sudo dnf remove -y rust cargo rustfmt &>/dev/null || true
+            elif command -v pacman &> /dev/null; then
+                echo -e "${BLUE}[*] Removing Rust using pacman...${NC}"
+                sudo pacman -R rust rust-docs &>/dev/null || true
+            elif command -v zypper &> /dev/null; then
+                echo -e "${BLUE}[*] Removing Rust using zypper...${NC}"
+                sudo zypper remove -y rust cargo &>/dev/null || true
+            else
+                echo -e "${RED}[!] Unknown package manager. Please manually remove the system Rust installation.${NC}"
+                return 1
+            fi
+            
+            echo -e "${GREEN}[+] System Rust packages removed${NC}"
+            return 0
+        else
+            echo -e "${RED}[!] System Rust installation conflicts with rustup.${NC}"
+            echo -e "${RED}[!] Please use '--force-remove' option to remove system Rust first,${NC}"
+            echo -e "${RED}[!] or manually remove it with your package manager:${NC}"
+            echo -e "${GREEN}    sudo apt remove rustc cargo   # For Debian/Ubuntu${NC}"
+            echo -e "${GREEN}    sudo dnf remove rust cargo    # For Fedora/RHEL${NC}"
+            echo -e "${GREEN}    sudo pacman -R rust           # For Arch Linux${NC}"
+            echo -e "${GREEN}    sudo zypper remove rust cargo # For openSUSE${NC}"
+            echo ""
+            echo -e "${RED}[!] Then run this script again.${NC}"
+            return 1
+        fi
+    fi
+    
+    # If rustup is installed but rustc isn't or doesn't work properly
+    if command -v rustup &> /dev/null && ! rustc --version &> /dev/null; then
+        echo -e "${YELLOW}[!] Rustup is installed but rustc doesn't work correctly${NC}"
+        echo -e "${BLUE}[*] This might be due to a broken rustup installation${NC}"
+        
+        # Check if ~/.rustup exists
+        if [ -d "$HOME/.rustup" ]; then
+            echo -e "${BLUE}[*] Found existing rustup installation in $HOME/.rustup${NC}"
+            
+            if [ "$FORCE_REMOVE_SYSTEM_RUST" = true ]; then
+                echo -e "${YELLOW}[!] Removing existing rustup installation...${NC}"
+                rustup self uninstall -y &>/dev/null || true
+                rm -rf "$HOME/.rustup" "$HOME/.cargo" 2>/dev/null || true
+                echo -e "${GREEN}[+] Existing rustup installation removed${NC}"
+                return 0
+            else
+                echo -e "${RED}[!] Use '--force-remove' to clean up the existing rustup installation.${NC}"
+                return 1
+            fi
+        fi
+    fi
+    
+    return 0
+}
+
 # Function to ensure rustup is installed with a default toolchain
 fix_rustup() {
+    # First check for system Rust installation
+    check_system_rust
+    if [ $? -ne 0 ]; then
+        return 1
+    fi
+    
     # Check if rustup is already installed
     if command -v rustup &> /dev/null; then
         echo -e "${BLUE}[*] Rustup is already installed${NC}"
@@ -162,6 +249,11 @@ fix_rustup() {
             return 0
         else
             echo -e "${RED}[!] Failed to install rustup properly${NC}"
+            echo -e "${YELLOW}[!] Checking for system Rust conflicts...${NC}"
+            if command -v rustc &> /dev/null; then
+                echo -e "${RED}[!] System Rust is still installed and may be conflicting.${NC}"
+                echo -e "${RED}[!] Please run this script with --force-remove option.${NC}"
+            fi
             return 1
         fi
     fi
@@ -199,7 +291,11 @@ main() {
     else
         echo ""
         echo -e "${RED}[!] Failed to fix rustup${NC}"
-        echo -e "${RED}[!] Please try manual installation:${NC}"
+        echo -e "${YELLOW}[!] You may need to:${NC}"
+        echo -e "${YELLOW}[!] 1. Remove system Rust with --force-remove${NC}"
+        echo -e "${YELLOW}[!] 2. Run rustup self uninstall manually${NC}"
+        echo -e "${YELLOW}[!] 3. Clean up ~/.cargo and ~/.rustup directories${NC}"
+        echo -e "${YELLOW}[!] Then try installing rustup again:${NC}"
         echo -e "${GREEN}    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${NC}"
         
         return 1
