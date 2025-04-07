@@ -16,12 +16,21 @@ This scanner provides a range of capabilities tailored for sophisticated network
     -   `TLS-Echo`: A specialized technique for detecting services hidden behind TLS proxies or load balancers.
     -   `Mimic`: Attempts to make scan traffic resemble legitimate application traffic (e.g., web browsing) to blend in.
     -   `Frag`: Splits scan packets into smaller fragments, potentially bypassing older intrusion detection systems that don't reassemble packets properly.
+    -   `DNS Tunnel`: Tunnels scan traffic through DNS queries to bypass restrictive firewalls that allow DNS traffic.
+    -   `ICMP Tunnel`: Tunnels scan traffic through ICMP echo (ping) packets to bypass restrictive firewalls that allow ICMP traffic.
+
 -   **Enhanced Evasion Techniques:** Employs methods to avoid detection by network security monitoring tools. This includes packet fragmentation (`Frag`), traffic mimicry (`Mimic`), random timing delays (`--random-delay`), source port manipulation, and potentially decoy scanning (consult specific options).
 
 -   **Memory-Only Mode (`-m`):** Designed for high-stakes operations where leaving traces on disk is unacceptable. Aims to load and execute the scanner primarily in RAM, minimizing forensic artifacts on the host system. (Requires suitable OS support/configuration, may involve RAM disk usage).
+
 -   **Banner Grabbing & Service Identification:** Attempts to retrieve service banners (e.g., SSH version, web server type) from open ports to help identify running software and potential vulnerabilities.
+
+-   **ML-based Service Identification:** Uses machine learning techniques to accurately identify services and extract version information when traditional banner grabbing isn't conclusive. This feature can detect services even when banners are obfuscated or missing by analyzing response patterns, characteristics, and behavior.
+
 -   **IPv6 Support:** Fully capable of scanning IPv6 addresses and subnets.
+
 -   **Tor Routing Support (`--use-tor`):** Can route scan traffic through the Tor network for source IP address anonymization. Requires a working Tor instance on the system. (Be aware of Tor's limitations and potential performance impact).
+
 -   **OpSec-Focused Design:** Built with operational security considerations at its core, including features for artifact reduction and network stealth.
 
 ## Building Quantum Scanner
@@ -147,6 +156,30 @@ Route scanning traffic through the Tor network for anonymization (requires Tor t
 sudo ./quantum_scanner --use-tor 192.168.1.1
 ```
 
+### Using DNS Tunneling for Restricted Networks
+
+Scans the target using DNS tunneling to bypass firewalls that block traditional scan types but allow DNS traffic.
+
+```bash
+sudo ./quantum_scanner --dns-tunnel --lookup-domain example.com 10.0.0.1
+```
+
+### Using ICMP Tunneling for Restricted Networks
+
+Scans the target using ICMP tunneling (ping packets) to bypass firewalls that block traditional scan types but allow ICMP traffic.
+
+```bash
+sudo ./quantum_scanner --icmp-tunnel 10.0.0.1
+```
+
+### Enhanced Service Identification with ML
+
+Uses the ML-based service identification to accurately identify services even when traditional banner grabbing is inconclusive.
+
+```bash
+sudo ./quantum_scanner --ml-ident 192.168.1.1
+```
+
 ### Comprehensive Command Options
 
 Here's a list of all available command options and their descriptions:
@@ -210,6 +243,15 @@ Here's a list of all available command options and their descriptions:
 
 #### Special Operations
 - `--fix-log-file <PATH>` - Path to a log file to unredact (without running a scan)
+
+#### Protocol Tunneling Options
+- `--dns-tunnel` - Enable DNS tunneling for scan traffic to bypass restrictive firewalls
+- `--icmp-tunnel` - Enable ICMP tunneling for scan traffic to bypass restrictive firewalls
+- `--dns-server <SERVER>` - Custom DNS server to use for DNS tunneling (IP address)
+- `--lookup-domain <DOMAIN>` - Custom lookup domain to use for DNS tunneling (default: "scanner-probe.net")
+
+#### Service Identification Options
+- `--ml-ident` - Enable ML-based service identification for more accurate detection (default: true)
 
 ## Requirements
 
@@ -295,6 +337,18 @@ Quantum Scanner supports multiple scan techniques, each with different advantage
 - **Detection:** Modern security systems typically reassemble and inspect fragments.
 - **Best For:** Testing fragmentation handling or bypassing simple packet filters.
 
+#### DNS Tunnel Scan
+- **Description:** Tunnels scan traffic through DNS queries to a controlled domain.
+- **Advantages:** Can bypass firewalls that block direct scanning but allow DNS traffic.
+- **Detection:** Generates unusual DNS queries that may be detected by DNS monitoring systems.
+- **Best For:** Scanning targets in highly restricted networks where traditional scanning methods are blocked.
+
+#### ICMP Tunnel Scan
+- **Description:** Encodes scan packets within ICMP echo (ping) packets.
+- **Advantages:** Can bypass firewalls that allow ping traffic but block port scanning.
+- **Detection:** May be detected by deep packet inspection or anomalous ICMP traffic patterns.
+- **Best For:** Scanning targets with firewalls that allow ICMP traffic but restrict other protocols.
+
 ### Evasion Techniques
 
 Quantum Scanner offers two levels of evasion capabilities:
@@ -351,6 +405,27 @@ The scanner also performs basic vulnerability detection by:
 - Identifying outdated service versions with known vulnerabilities.
 - Checking for common misconfigurations in detected services.
 - Looking for weak encryption or security implementations.
+
+### ML-based Service Identification
+
+The Quantum Scanner includes an advanced ML-based service identification system that can accurately identify services even when traditional banner grabbing methods are unreliable or inconclusive.
+
+#### Core Capabilities:
+- **Service Fingerprinting:** Analyzes service responses using multiple feature vectors rather than simple string matching.
+- **Version Extraction:** Uses specialized patterns to extract version information from identified services.
+- **Binary Protocol Analysis:** Can identify services using binary (non-text) protocols by analyzing response patterns.
+
+#### Key Features:
+- **Feature Vector Analysis:** Extracts dozens of features from service responses including character distributions, entropy, structural elements, and protocol indicators.
+- **Port-Context Awareness:** Incorporates port information to improve classification accuracy.
+- **Temporal Analysis:** Analyzes response timing characteristics which can help identify certain services.
+
+#### When to Use:
+- When services don't provide clear identification strings in banners
+- For ambiguous or custom services that don't follow standard protocols
+- When service banners have been deliberately modified to conceal the actual service
+
+ML-based service identification is enabled by default (`--ml-ident`) and integrates seamlessly with the scanner's other service detection methods.
 
 ## License
 

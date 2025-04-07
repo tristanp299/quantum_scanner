@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::fs;
 use std::io::{Read, Write};
 use serde_json;
+use std::net::IpAddr;
 
 mod scanner;
 mod models;
@@ -16,13 +17,63 @@ mod utils;
 mod output;
 mod http_analyzer;
 mod service_fingerprints;
+mod tunnel;
+mod ml_service_ident;
 
 use scanner::QuantumScanner;
 use models::{ScanType, PortRange, PortRanges, TopPorts};
 
 /// Advanced port scanner with evasion capabilities
 #[derive(Parser)]
-#[clap(author, version, about, long_about = None, name = "quantum_scanner")]
+#[clap(
+    author, 
+    version, 
+    about, 
+    long_about = None, 
+    name = "quantum_scanner",
+    after_help = "EXAMPLES:
+    # Run a basic SYN scan against a target
+    quantum_scanner 192.168.1.1
+
+    # Scan a range with multiple techniques and evasion
+    quantum_scanner 192.168.0.0/24 -p 22,80,443-8000 -s syn,fin,xmas -e
+
+    # Full stealth scan through Tor with enhanced evasion
+    quantum_scanner example.com -E -m --mimic-os linux --use-tor
+
+    # Save results to a file in JSON format
+    quantum_scanner 10.0.0.1 -j -o scan_results.json
+
+SCAN TYPES:
+    syn     - Standard TCP SYN scan (efficient and relatively stealthy)
+    ssl     - Probes for SSL/TLS service information and certificates
+    udp     - Basic UDP port scan with custom payload options
+    ack     - TCP ACK scan to detect firewall filtering rules
+    fin     - Stealthy scan using TCP FIN flags to bypass basic filters
+    xmas    - TCP scan with FIN, URG, and PUSH flags set
+    null    - TCP scan with no flags set, may bypass some packet filters
+    window  - Analyzes TCP window size responses to determine port status
+    tls-echo- Uses fake TLS server responses to evade detection
+    mimic   - Sends SYN packets with protocol-specific payloads
+    frag    - Fragments packets to bypass deep packet inspection
+
+MIMIC PROTOCOLS (used with --mimic-protocol):
+    HTTP    - Mimics HTTP server (default)
+    SSH     - Mimics OpenSSH server
+    FTP     - Mimics FTP server
+    SMTP    - Mimics SMTP mail server
+    IMAP    - Mimics IMAP mail server
+    POP3    - Mimics POP3 mail server
+    MYSQL   - Mimics MySQL database server
+    RDP     - Mimics Remote Desktop Protocol server
+
+OS PROFILES (used with --mimic-os):
+    windows - Mimics Windows networking behavior
+    linux   - Mimics Linux networking behavior
+    macos   - Mimics macOS networking behavior
+    random  - Uses randomly selected OS profile (default)
+"
+)]
 struct Args {
     /// Target IP address, hostname, or CIDR notation for subnet
     #[clap(value_parser)]
@@ -37,6 +88,7 @@ struct Args {
     memory_only: bool,
 
     /// Scan techniques to use (comma-separated)
+    /// Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag
     /// Examples: -s syn,ssl,udp or -s syn -s ssl
     /// Important: Do not include spaces after commas (use 'syn,ssl,udp' NOT 'syn, ssl, udp')
     #[clap(short, long, default_value = "syn")]
@@ -92,6 +144,7 @@ struct Args {
     timeout_banner: f64,
 
     /// Protocol to mimic in mimic scans
+    /// Available protocols: HTTP, SSH, FTP, SMTP, IMAP, POP3, MYSQL, RDP
     #[clap(long, default_value = "HTTP")]
     mimic_protocol: String,
 
@@ -140,6 +193,7 @@ struct Args {
     enhanced_evasion: bool,
     
     /// Operating system to mimic in enhanced evasion mode
+    /// Available OS profiles: windows, linux, macos, random
     #[clap(long)]
     mimic_os: Option<String>,
     
@@ -210,6 +264,26 @@ struct Args {
     /// operation on the specified log file, replacing [REDACTED] with the target IP.
     #[clap(long)]
     fix_log_file: Option<PathBuf>,
+
+    /// Use DNS tunneling to bypass restrictive firewalls
+    #[clap(long = "dns-tunnel", default_value_t = false)]
+    dns_tunnel: bool,
+    
+    /// Use ICMP tunneling to bypass restrictive firewalls
+    #[clap(long = "icmp-tunnel", default_value_t = false)]
+    icmp_tunnel: bool,
+    
+    /// Custom DNS server to use for DNS tunneling
+    #[clap(long = "dns-server")]
+    dns_server: Option<String>,
+    
+    /// Custom lookup domain to use for DNS tunneling
+    #[clap(long = "lookup-domain")]
+    lookup_domain: Option<String>,
+    
+    /// Enable ML-based service identification for ambiguous services
+    #[clap(long = "ml-ident", default_value_t = true)]
+    ml_identification: bool,
 }
 
 /// Enum for scan types from CLI
@@ -682,40 +756,33 @@ fn fix_redacted_log(log_file: &PathBuf, ip_address: &str) -> Result<usize, anyho
     Ok(redacted_count)
 }
 
-/// Parse scan types from a string 
-fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>, anyhow::Error> {
+/// Parse scan types from a comma-separated string
+fn parse_scan_types(scan_types_str: &str) -> anyhow::Result<Vec<ScanType>> {
     let mut scan_types = Vec::new();
     
-    // Split by comma and trim whitespace
     for scan_type_str in scan_types_str.split(',') {
-        let trimmed = scan_type_str.trim();
-        if trimmed.is_empty() {
-            continue;
+        let scan_type_str = scan_type_str.trim().to_lowercase();
+        
+        match scan_type_str.as_str() {
+            "syn" => scan_types.push(ScanType::Syn),
+            "ssl" => scan_types.push(ScanType::Ssl),
+            "udp" => scan_types.push(ScanType::Udp),
+            "ack" => scan_types.push(ScanType::Ack),
+            "fin" => scan_types.push(ScanType::Fin),
+            "xmas" => scan_types.push(ScanType::Xmas),
+            "null" => scan_types.push(ScanType::Null),
+            "window" => scan_types.push(ScanType::Window),
+            "tls-echo" | "tls_echo" => scan_types.push(ScanType::TlsEcho),
+            "mimic" => scan_types.push(ScanType::Mimic),
+            "frag" => scan_types.push(ScanType::Frag),
+            "dns-tunnel" | "dns_tunnel" => scan_types.push(ScanType::DnsTunnel),
+            "icmp-tunnel" | "icmp_tunnel" => scan_types.push(ScanType::IcmpTunnel),
+            _ => return Err(anyhow::anyhow!("Invalid scan type: {}", scan_type_str)),
         }
-        
-        // Convert string to ScanTypeArg
-        let scan_type_arg = match trimmed.to_lowercase().as_str() {
-            "syn" => ScanTypeArg::Syn,
-            "ssl" => ScanTypeArg::Ssl,
-            "udp" => ScanTypeArg::Udp,
-            "ack" => ScanTypeArg::Ack,
-            "fin" => ScanTypeArg::Fin,
-            "xmas" => ScanTypeArg::Xmas,
-            "null" => ScanTypeArg::Null,
-            "window" => ScanTypeArg::Window,
-            "tls-echo" | "tlsecho" => ScanTypeArg::TlsEcho,
-            "mimic" => ScanTypeArg::Mimic,
-            "frag" => ScanTypeArg::Frag,
-            _ => return Err(anyhow::anyhow!("Invalid scan type: '{}'. Valid types are: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag", trimmed)),
-        };
-        
-        // Convert to ScanType and add to list
-        scan_types.push(ScanType::from(scan_type_arg));
     }
     
     if scan_types.is_empty() {
-        // Default to SYN scan if nothing valid was provided
-        scan_types.push(ScanType::Syn);
+        return Err(anyhow::anyhow!("No valid scan types provided"));
     }
     
     Ok(scan_types)
@@ -885,8 +952,8 @@ async fn main() -> Result<(), anyhow::Error> {
         process::exit(1);
     }
     
-    // Parse scan types from string, handling spaces after commas
-    let scan_types = parse_scan_types(&args.scan_types_str)?;
+    // Parse the scan types
+    let mut scan_types = parse_scan_types(&args.scan_types_str)?;
     
     // Check if we need raw socket privileges
     let needs_raw_sockets = scanner::requires_raw_sockets(&scan_types);
@@ -899,14 +966,13 @@ async fn main() -> Result<(), anyhow::Error> {
     // Print scan types being used
     println!("[{}+{}] Using scan types: {}", colors.green, colors.reset, args.scan_types_str);
     
-    // Create scanner instance with enhanced evasion options
+    // Configure scanner with parsed options
     let mut scanner = QuantumScanner::new(
         &args.target,
         ports_to_scan.clone(),
-        scan_types,
+        scan_types.clone(),  // Clone to avoid ownership issues
         args.concurrency,
         args.rate,
-        // Use enhanced evasion if specified
         args.evasion || args.enhanced_evasion,
         args.verbose,
         args.ipv6,
@@ -1054,6 +1120,32 @@ async fn main() -> Result<(), anyhow::Error> {
                     colors.yellow, colors.reset, e),
             }
         }
+    }
+    
+    // Add tunneling scan types if requested
+    if args.dns_tunnel && !scan_types.contains(&ScanType::DnsTunnel) {
+        scan_types.push(ScanType::DnsTunnel);
+    }
+
+    if args.icmp_tunnel && !scan_types.contains(&ScanType::IcmpTunnel) {
+        scan_types.push(ScanType::IcmpTunnel);
+    }
+
+    // Configure DNS tunneling options if needed
+    if args.dns_tunnel || scan_types.contains(&ScanType::DnsTunnel) {
+        let dns_server = if let Some(dns_server_str) = &args.dns_server {
+            match dns_server_str.parse::<std::net::IpAddr>() {
+                Ok(ip) => Some(ip),
+                Err(e) => {
+                    eprintln!("Error parsing DNS server IP: {}", e);
+                    return Err(anyhow::anyhow!("Invalid DNS server: {}", e));
+                }
+            }
+        } else {
+            None
+        };
+        
+        scanner.set_dns_tunnel_options(dns_server, args.lookup_domain.as_deref());
     }
     
     println!("{}Quantum Scanner operation complete{}", colors.green, colors.reset);

@@ -30,6 +30,10 @@ pub enum ScanType {
     Mimic,
     /// Fragments packets to bypass deep packet inspection
     Frag,
+    /// Tunnels scan through DNS queries to bypass restrictive firewalls
+    DnsTunnel,
+    /// Tunnels scan through ICMP echo requests to bypass restrictive firewalls
+    IcmpTunnel,
 }
 
 impl fmt::Display for ScanType {
@@ -46,6 +50,8 @@ impl fmt::Display for ScanType {
             ScanType::TlsEcho => write!(f, "TLS_ECHO"),
             ScanType::Mimic => write!(f, "MIMIC"),
             ScanType::Frag => write!(f, "FRAG"),
+            ScanType::DnsTunnel => write!(f, "DNS_TUNNEL"),
+            ScanType::IcmpTunnel => write!(f, "ICMP_TUNNEL"),
         }
     }
 }
