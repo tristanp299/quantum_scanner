@@ -1028,17 +1028,6 @@ impl QuantumScanner {
         if let Some(buffer) = &self.memory_log {
             buffer.log(level, message);
         }
-        
-        // Also write to standard logger if verbose mode is enabled
-        if self.verbose {
-            match level {
-                "INFO" => info!("{}", message),
-                "WARN" => warn!("{}", message),
-                "ERROR" => log::error!("{}", message),
-                "DEBUG" => debug!("{}", message),
-                _ => info!("{}", message),
-            }
-        }
     }
     
     /// Retry failed ports with a different scan method

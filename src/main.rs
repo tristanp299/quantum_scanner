@@ -23,15 +23,52 @@ mod ml_service_ident;
 use scanner::QuantumScanner;
 use models::{ScanType, PortRange, PortRanges, TopPorts};
 
-/// Advanced port scanner with evasion capabilities
+/// Advanced port scanner with evasion capabilities for authorized red team operations
 #[derive(Parser)]
 #[clap(
     author, 
     version, 
-    about, 
-    long_about = None, 
+    about = "A sophisticated network scanner with advanced evasion capabilities for security assessments",
+    long_about = "Quantum Scanner provides comprehensive network reconnaissance capabilities with a focus on operational security. It enables secure, controlled scanning with multiple techniques and evasive measures.",
     name = "quantum_scanner",
-    after_help = "EXAMPLES:
+)]
+#[clap(group(
+    clap::ArgGroup::new("target_selection")
+        .multiple(false)
+))]
+#[clap(group(
+    clap::ArgGroup::new("scan_execution")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("output_options")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("evasion_options")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("tunneling_options")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("service_detection")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("timing_control")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("fragmentation")
+        .multiple(true)
+))]
+#[clap(group(
+    clap::ArgGroup::new("operational_security")
+        .multiple(true)
+))]
+#[clap(after_help = "EXAMPLES:
     # Run a basic SYN scan against a target
     quantum_scanner 192.168.1.1
 
@@ -41,249 +78,244 @@ use models::{ScanType, PortRange, PortRanges, TopPorts};
     # Full stealth scan through Tor with enhanced evasion
     quantum_scanner example.com -E -m --mimic-os linux --use-tor
 
+    # Using protocol tunneling to bypass firewalls
+    quantum_scanner 10.0.0.1 --dns-tunnel --lookup-domain example.com
+
+    # Enhanced service identification with ML
+    quantum_scanner 192.168.1.100 --ml-ident -p 22,80,443
+
     # Save results to a file in JSON format
     quantum_scanner 10.0.0.1 -j -o scan_results.json
 
-SCAN TYPES:
-    syn     - Standard TCP SYN scan (efficient and relatively stealthy)
-    ssl     - Probes for SSL/TLS service information and certificates
-    udp     - Basic UDP port scan with custom payload options
-    ack     - TCP ACK scan to detect firewall filtering rules
-    fin     - Stealthy scan using TCP FIN flags to bypass basic filters
-    xmas    - TCP scan with FIN, URG, and PUSH flags set
-    null    - TCP scan with no flags set, may bypass some packet filters
-    window  - Analyzes TCP window size responses to determine port status
-    tls-echo- Uses fake TLS server responses to evade detection
-    mimic   - Sends SYN packets with protocol-specific payloads
-    frag    - Fragments packets to bypass deep packet inspection
+AVAILABLE SCAN TYPES:
+    syn         - Standard TCP SYN scan (efficient and relatively stealthy)
+    ssl         - Probes for SSL/TLS service information and certificates
+    udp         - Basic UDP port scan with custom payload options
+    ack         - TCP ACK scan to detect firewall filtering rules
+    fin         - Stealthy scan using TCP FIN flags to bypass basic filters
+    xmas        - TCP scan with FIN, URG, and PUSH flags set
+    null        - TCP scan with no flags set, may bypass some packet filters
+    window      - Analyzes TCP window size responses to determine port status
+    tls-echo    - Uses fake TLS server responses to evade detection
+    mimic       - Sends SYN packets with protocol-specific payloads
+    frag        - Fragments packets to bypass deep packet inspection
+    dns-tunnel  - Tunnels scan traffic through DNS queries
+    icmp-tunnel - Tunnels scan traffic through ICMP echo (ping) packets
 
-MIMIC PROTOCOLS (used with --mimic-protocol):
-    HTTP    - Mimics HTTP server (default)
-    SSH     - Mimics OpenSSH server
-    FTP     - Mimics FTP server
-    SMTP    - Mimics SMTP mail server
-    IMAP    - Mimics IMAP mail server
-    POP3    - Mimics POP3 mail server
-    MYSQL   - Mimics MySQL database server
-    RDP     - Mimics Remote Desktop Protocol server
+MIMICRY OPTIONS:
+    PROTOCOLS (used with --mimic-protocol):
+        HTTP    - Mimics HTTP server (default)
+        SSH     - Mimics OpenSSH server
+        FTP     - Mimics FTP server
+        SMTP    - Mimics SMTP mail server
+        IMAP    - Mimics IMAP mail server
+        POP3    - Mimics POP3 mail server
+        MYSQL   - Mimics MySQL database server
+        RDP     - Mimics Remote Desktop Protocol server
 
-OS PROFILES (used with --mimic-os):
-    windows - Mimics Windows networking behavior
-    linux   - Mimics Linux networking behavior
-    macos   - Mimics macOS networking behavior
-    random  - Uses randomly selected OS profile (default)
+    OS PROFILES (used with --mimic-os):
+        windows - Mimics Windows networking behavior
+        linux   - Mimics Linux networking behavior
+        macos   - Mimics macOS networking behavior
+        random  - Uses randomly selected OS profile (default)
 "
 )]
 struct Args {
     /// Target IP address, hostname, or CIDR notation for subnet
-    #[clap(value_parser)]
+    #[clap(value_parser, group = "target_selection")]
     target: String,
 
+    // ========== TARGET AND PORT SELECTION ==========
+    
     /// Ports to scan (comma-separated, ranges like 1-1000)
-    #[clap(short, long, default_value = "1-1000")]
+    #[clap(short, long, default_value = "1-1000", group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
     ports: String,
 
-    /// Enable memory-only mode (no disk writes)
-    #[clap(short = 'm', long)]
-    memory_only: bool,
-
-    /// Scan techniques to use (comma-separated)
-    /// Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag
-    /// Examples: -s syn,ssl,udp or -s syn -s ssl
-    /// Important: Do not include spaces after commas (use 'syn,ssl,udp' NOT 'syn, ssl, udp')
-    #[clap(short, long, default_value = "syn")]
-    scan_types_str: String,
-
-    /// Maximum concurrent operations
-    #[clap(short, long, default_value_t = 100)]
-    concurrency: usize,
-
-    /// Maximum packets per second
-    #[clap(short = 'r', long, default_value_t = 0)]
-    rate: usize,
-
-    /// Enable evasion techniques
-    #[clap(short, long, help = "Enable basic evasion techniques (simple TTL manipulation, basic timing randomization, minimal TCP option adjustment, packet sequencing randomization)")]
-    evasion: bool,
-
-    /// Enable verbose output
-    /// 
-    /// When enabled, this flag causes the scanner to output detailed information
-    /// about the scanning process to stdout, including debug-level messages.
-    /// In disk mode, verbose logs are also written to the log file.
-    /// This provides both real-time console output and persistent logs,
-    /// making it easier to monitor scan progress and troubleshoot issues.
-    /// 
-    /// For red team operations, consider the operational security implications
-    /// of enabling verbose output, as it creates more evidence of your activities.
-    #[clap(short, long)]
-    verbose: bool,
-
-    /// Use IPv6
-    #[clap(short = '6', long)]
-    ipv6: bool,
-
-    /// Output results in JSON format
-    #[clap(short = 'j', long)]
-    json: bool,
-
-    /// Write results to file
-    #[clap(short, long)]
-    output: Option<PathBuf>,
-
-    /// Scan timeout in seconds
-    #[clap(short, long, default_value_t = 3.0)]
-    timeout: f64,
-
-    /// Connect timeout in seconds
-    #[clap(long, default_value_t = 3.0)]
-    timeout_connect: f64,
-
-    /// Banner grabbing timeout in seconds
-    #[clap(long, default_value_t = 3.0)]
-    timeout_banner: f64,
-
-    /// Protocol to mimic in mimic scans
-    /// Available protocols: HTTP, SSH, FTP, SMTP, IMAP, POP3, MYSQL, RDP
-    #[clap(long, default_value = "HTTP")]
-    mimic_protocol: String,
-
-    /// Minimum fragment size for fragmented scans
-    #[clap(long, default_value_t = 24)]
-    frag_min_size: u16,
-
-    /// Maximum fragment size for fragmented scans
-    #[clap(long, default_value_t = 64)]
-    frag_max_size: u16,
-
-    /// Minimum delay between fragments in seconds
-    #[clap(long, default_value_t = 0.01)]
-    frag_min_delay: f64,
-
-    /// Maximum delay between fragments in seconds
-    #[clap(long, default_value_t = 0.1)]
-    frag_max_delay: f64,
-
-    /// Timeout for fragmented scans in seconds
-    #[clap(long, default_value_t = 10)]
-    frag_timeout: u64,
-
-    /// Minimum size of first fragment
-    #[clap(long, default_value_t = 64)]
-    frag_first_min_size: u16,
-
-    /// Use exactly two fragments
-    #[clap(long)]
-    frag_two_frags: bool,
-
-    /// Log file path
-    #[clap(long, default_value = "scanner.log")]
-    log_file: PathBuf,
-    
-    /// Encrypt logs with a password
-    #[clap(long, default_value_t = true)]
-    encrypt_logs: bool,
-    
-    /// Password for log encryption
-    #[clap(long)]
-    _log_password: Option<String>,
-    
-    /// Enable enhanced evasion techniques
-    #[clap(short = 'E', long, default_value_t = false, help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol-specific mimicry, banner grabbing suppression, sophisticated protocol variants)")]
-    enhanced_evasion: bool,
-    
-    /// Operating system to mimic in enhanced evasion mode
-    /// Available OS profiles: windows, linux, macos, random
-    #[clap(long)]
-    mimic_os: Option<String>,
-    
-    /// TTL jitter amount for enhanced evasion (1-5)
-    #[clap(long, default_value_t = 2)]
-    ttl_jitter: u8,
-    
-    /// Protocol variant for protocol mimicry
-    #[clap(long)]
-    protocol_variant: Option<String>,
-    
-    /// Add randomized delay before scan start (0-5 seconds)
-    #[clap(long, default_value_t = true)]
-    random_delay: bool,
-    
-    /// Maximum random delay in seconds
-    #[clap(long, default_value_t = 3)]
-    max_delay: u64,
-    
-    /// Route traffic through Tor if available
-    #[clap(long, default_value_t = true)]
-    use_tor: bool,
-    
-    /// Create RAM disk for temporary files
-    #[clap(long, default_value_t = true)]
-    use_ramdisk: bool,
-    
-    /// RAM disk size in MB
-    #[clap(long, default_value_t = 10)]
-    ramdisk_size: u64,
-    
-    /// RAM disk mount point
-    #[clap(long, default_value = "/mnt/quantum_scanner_ramdisk")]
-    ramdisk_mount: PathBuf,
-    
-    /// Use ANSI colors in output
-    #[clap(long, default_value_t = true)]
-    color: bool,
-    
-    /// Securely delete files after scan
-    /// 
-    /// When enabled, this option performs secure deletion of log files and 
-    /// any temporary files created during the scan using multiple overwrite passes.
-    /// This option is disabled by default for operational safety and can be 
-    /// explicitly enabled when needed for sensitive operations.
-    /// 
-    /// For maximum operational security, enable this flag when operating in
-    /// sensitive or hostile environments to prevent data forensics recovery.
-    #[clap(long, default_value_t = false)]
-    secure_delete: bool,
-    
-    /// Number of secure delete passes
-    /// 
-    /// Specifies how many passes of overwriting should be performed when
-    /// secure_delete is enabled. More passes provide better security but
-    /// take longer. Default is 3 passes which is a good balance between
-    /// security and performance.
-    #[clap(long, default_value_t = 3)]
-    delete_passes: u8,
-
     /// Scan the top 100 common ports
-    #[clap(short = 'T', long)]
+    #[clap(short = 'T', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
     top_100: bool,
 
-    /// Path to a log file to unredact (without running a scan)
-    /// 
-    /// When provided without running a scan, this will only perform the redaction removal
-    /// operation on the specified log file, replacing [REDACTED] with the target IP.
-    #[clap(long)]
-    fix_log_file: Option<PathBuf>,
+    /// Use IPv6
+    #[clap(short = '6', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
+    ipv6: bool,
+
+    // ========== SCAN METHODS ==========
+
+    /// Scan techniques to use (comma-separated)
+    #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas")]
+    scan_types_str: String,
+
+    /// Enable ML-based service identification for ambiguous services
+    #[clap(long = "ml-ident", default_value_t = true, group = "service_detection", help_heading = "SERVICE DETECTION")]
+    ml_identification: bool,
+
+    // ========== EVASION OPTIONS ==========
+
+    /// Enable basic evasion techniques 
+    #[clap(short, long, group = "evasion_options", help_heading = "EVASION OPTIONS", long_help = "Enable basic evasion techniques (simple TTL manipulation, basic timing randomization, minimal TCP option adjustment, packet sequencing randomization)")]
+    evasion: bool,
+
+    /// Enable advanced evasion techniques
+    #[clap(short = 'E', long, default_value_t = false, group = "evasion_options", help_heading = "EVASION OPTIONS", long_help = "Enable advanced evasion techniques (OS fingerprint spoofing, TTL jittering, protocol-specific mimicry, banner grabbing suppression, sophisticated protocol variants)")]
+    enhanced_evasion: bool,
+
+    /// Operating system to mimic in enhanced evasion mode (windows, linux, macos, random)
+    #[clap(long, group = "evasion_options", help_heading = "EVASION OPTIONS")]
+    mimic_os: Option<String>,
+
+    /// TTL jitter amount for enhanced evasion (1-5)
+    #[clap(long, default_value_t = 2, group = "evasion_options", help_heading = "EVASION OPTIONS")]
+    ttl_jitter: u8,
+
+    /// Protocol to mimic in mimic scans (HTTP, SSH, FTP, SMTP, IMAP, POP3, MYSQL, RDP)
+    #[clap(long, default_value = "HTTP", group = "evasion_options", help_heading = "EVASION OPTIONS")]
+    mimic_protocol: String,
+
+    /// Protocol variant for protocol mimicry
+    #[clap(long, group = "evasion_options", help_heading = "EVASION OPTIONS")]
+    protocol_variant: Option<String>,
+
+    /// Route traffic through Tor if available
+    #[clap(long, default_value_t = true, group = "evasion_options", help_heading = "EVASION OPTIONS")]
+    use_tor: bool,
+
+    // ========== TUNNELING OPTIONS ==========
 
     /// Use DNS tunneling to bypass restrictive firewalls
-    #[clap(long = "dns-tunnel", default_value_t = false)]
+    #[clap(long = "dns-tunnel", default_value_t = false, group = "tunneling_options", help_heading = "TUNNELING OPTIONS")]
     dns_tunnel: bool,
     
     /// Use ICMP tunneling to bypass restrictive firewalls
-    #[clap(long = "icmp-tunnel", default_value_t = false)]
+    #[clap(long = "icmp-tunnel", default_value_t = false, group = "tunneling_options", help_heading = "TUNNELING OPTIONS")]
     icmp_tunnel: bool,
     
     /// Custom DNS server to use for DNS tunneling
-    #[clap(long = "dns-server")]
+    #[clap(long = "dns-server", group = "tunneling_options", help_heading = "TUNNELING OPTIONS")]
     dns_server: Option<String>,
     
     /// Custom lookup domain to use for DNS tunneling
-    #[clap(long = "lookup-domain")]
+    #[clap(long = "lookup-domain", group = "tunneling_options", help_heading = "TUNNELING OPTIONS")]
     lookup_domain: Option<String>,
+
+    // ========== TIMING AND PERFORMANCE ==========
+
+    /// Maximum concurrent operations
+    #[clap(short, long, default_value_t = 100, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    concurrency: usize,
+
+    /// Maximum packets per second
+    #[clap(short = 'r', long, default_value_t = 0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    rate: usize,
+
+    /// Scan timeout in seconds
+    #[clap(short, long, default_value_t = 3.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    timeout: f64,
+
+    /// Connect timeout in seconds
+    #[clap(long, default_value_t = 3.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    timeout_connect: f64,
+
+    /// Banner grabbing timeout in seconds
+    #[clap(long, default_value_t = 3.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    timeout_banner: f64,
+
+    /// Add randomized delay before scan start (0-5 seconds)
+    #[clap(long, default_value_t = true, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    random_delay: bool,
     
-    /// Enable ML-based service identification for ambiguous services
-    #[clap(long = "ml-ident", default_value_t = true)]
-    ml_identification: bool,
+    /// Maximum random delay in seconds
+    #[clap(long, default_value_t = 3, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    max_delay: u64,
+
+    // ========== FRAGMENTATION OPTIONS ==========
+
+    /// Minimum fragment size for fragmented scans
+    #[clap(long, default_value_t = 24, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_min_size: u16,
+
+    /// Maximum fragment size for fragmented scans
+    #[clap(long, default_value_t = 64, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_max_size: u16,
+
+    /// Minimum delay between fragments in seconds
+    #[clap(long, default_value_t = 0.01, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_min_delay: f64,
+
+    /// Maximum delay between fragments in seconds
+    #[clap(long, default_value_t = 0.1, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_max_delay: f64,
+
+    /// Timeout for fragmented scans in seconds
+    #[clap(long, default_value_t = 10, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_timeout: u64,
+
+    /// Minimum size of first fragment
+    #[clap(long, default_value_t = 64, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_first_min_size: u16,
+
+    /// Use exactly two fragments
+    #[clap(long, group = "fragmentation", help_heading = "FRAGMENTATION OPTIONS")]
+    frag_two_frags: bool,
+
+    // ========== OUTPUT OPTIONS ==========
+
+    /// Enable verbose output
+    #[clap(short, long, group = "output_options", help_heading = "OUTPUT OPTIONS", long_help = "When enabled, provides detailed information about the scanning process to stdout, including debug-level messages. In disk mode, verbose logs are also written to the log file.")]
+    verbose: bool,
+
+    /// Output results in JSON format
+    #[clap(short = 'j', long, group = "output_options", help_heading = "OUTPUT OPTIONS")]
+    json: bool,
+
+    /// Write results to file
+    #[clap(short, long, group = "output_options", help_heading = "OUTPUT OPTIONS")]
+    output: Option<PathBuf>,
+
+    /// Use ANSI colors in output
+    #[clap(long, default_value_t = true, group = "output_options", help_heading = "OUTPUT OPTIONS")]
+    color: bool,
+
+    // ========== OPERATIONAL SECURITY ==========
+
+    /// Enable memory-only mode (no disk writes)
+    #[clap(short = 'm', long, group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    memory_only: bool,
+
+    /// Log file path
+    #[clap(long, default_value = "scanner.log", group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    log_file: PathBuf,
+    
+    /// Encrypt logs with a password
+    #[clap(long, default_value_t = true, group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    encrypt_logs: bool,
+    
+    /// Password for log encryption
+    #[clap(long, group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    _log_password: Option<String>,
+    
+    /// Create RAM disk for temporary files
+    #[clap(long, default_value_t = true, group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    use_ramdisk: bool,
+    
+    /// RAM disk size in MB
+    #[clap(long, default_value_t = 10, group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    ramdisk_size: u64,
+    
+    /// RAM disk mount point
+    #[clap(long, default_value = "/mnt/quantum_scanner_ramdisk", group = "operational_security", help_heading = "OPERATIONAL SECURITY")]
+    ramdisk_mount: PathBuf,
+
+    /// Securely delete files after scan
+    #[clap(long, default_value_t = false, group = "operational_security", help_heading = "OPERATIONAL SECURITY", long_help = "When enabled, performs secure deletion of log files and temporary files using multiple overwrite passes. Disabled by default for operational safety.")]
+    secure_delete: bool,
+    
+    /// Number of secure delete passes
+    #[clap(long, default_value_t = 3, group = "operational_security", help_heading = "OPERATIONAL SECURITY", long_help = "Specifies how many passes of overwriting should be performed when secure_delete is enabled. More passes provide better security but take longer.")]
+    delete_passes: u8,
+
+    /// Path to a log file to unredact (without running a scan)
+    #[clap(long, group = "operational_security", help_heading = "OPERATIONAL SECURITY", long_help = "When provided without running a scan, this will only perform the redaction removal operation on the specified log file, replacing [REDACTED] with the target IP.")]
+    fix_log_file: Option<PathBuf>,
 }
 
 /// Enum for scan types from CLI
