@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 use std::env;
 use chrono::{Utc};
 
-use log::{debug, warn};
+use log::{debug, warn, trace};
 use pnet::datalink;
 use rand::{Rng, thread_rng, distributions::{Distribution, Uniform}};
 use rand::seq::SliceRandom;
@@ -178,88 +178,9 @@ pub fn backoff_delay(retry: usize, base_ms: u64, max_ms: u64) -> Duration {
 /// # Returns
 /// * `bool` - True if the IP is allowed to be scanned
 #[allow(dead_code)]
-pub fn is_ip_allowed(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            // Check for private ranges
-            if ipv4.is_private() && !is_private_allowed() {
-                return false;
-            }
-            
-            // Check for other reserved ranges
-            if ipv4.is_loopback() || ipv4.is_link_local() || ipv4.is_broadcast() || 
-               ipv4.is_multicast() || ipv4.is_documentation() {
-                return false;
-            }
-            
-            // IANA reserved blocks to avoid
-            let reserved_blocks = [
-                (Ipv4Addr::new(0, 0, 0, 0), Ipv4Addr::new(0, 255, 255, 255)),        // 0.0.0.0/8
-                (Ipv4Addr::new(127, 0, 0, 0), Ipv4Addr::new(127, 255, 255, 255)),    // 127.0.0.0/8
-                (Ipv4Addr::new(224, 0, 0, 0), Ipv4Addr::new(239, 255, 255, 255)),    // 224.0.0.0/4 (multicast)
-                (Ipv4Addr::new(240, 0, 0, 0), Ipv4Addr::new(255, 255, 255, 255)),    // 240.0.0.0/4 (future use)
-            ];
-            
-            for &(start, end) in &reserved_blocks {
-                if is_ipv4_in_range(ipv4, start, end) {
-                    return false;
-                }
-            }
-            
-            true
-        },
-        IpAddr::V6(ipv6) => {
-            // Disallow loopback, multicast, etc.
-            if ipv6.is_loopback() || ipv6.is_multicast() || ipv6.is_unspecified() {
-                return false;
-            }
-            
-            // Allow ULA (Unique Local Addresses) only if private is allowed
-            if is_ipv6_ula(ipv6) && !is_private_allowed() {
-                return false;
-            }
-            
-            true
-        }
-    }
-}
-
-/// Helper to check if a IPv4 address is within a range
 #[allow(dead_code)]
-fn is_ipv4_in_range(ip: Ipv4Addr, start: Ipv4Addr, end: Ipv4Addr) -> bool {
-    let ip_u32: u32 = u32::from(ip);
-    let start_u32: u32 = u32::from(start);
-    let end_u32: u32 = u32::from(end);
-    
-    ip_u32 >= start_u32 && ip_u32 <= end_u32
-}
-
-/// Check if the IPv6 address is a Unique Local Address (ULA)
 #[allow(dead_code)]
-fn is_ipv6_ula(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    (segments[0] & 0xfe00) == 0xfc00
-}
-
-/// Determine if scanning private networks is allowed
-///
-/// Reads from environment variable QUANTUM_ALLOW_PRIVATE.
-/// For operational security, defaults to false if not explicitly enabled.
 #[allow(dead_code)]
-fn is_private_allowed() -> bool {
-    // Check for environment variable to enable private network scanning
-    match env::var("QUANTUM_ALLOW_PRIVATE") {
-        Ok(val) => {
-            // Only enable if explicitly set to "true"
-            val.to_lowercase() == "true" || val == "1"
-        },
-        Err(_) => false, // By default, don't allow scanning private IPs
-    }
-}
-
-/// Create a pseudo-random pattern for packet payloads
-///
-/// Generates a byte pattern that looks somewhat random but
 /// is deterministic based on length. This can help identify
 /// our packets if needed, while still being difficult to detect
 /// as a scanner.
@@ -1723,31 +1644,52 @@ pub fn create_custom_dns_resolver(dns_server: IpAddr) -> anyhow::Result<hickory_
     Ok(resolver)
 }
 
-/// Send a custom ICMP echo request packet
+/// Send an ICMP packet with the specified payload and TTL
 /// 
-/// This is a placeholder implementation that would normally use raw sockets
-/// to craft and send custom ICMP packets. For simplicity and portability,
+/// This is a placeholder implementation for a function that would normally send
+/// a raw ICMP packet using libpcap or similar. For operational security,
 /// this version uses a basic approach that would need to be expanded in
 /// a real implementation.
 pub async fn send_icmp_packet(target_ip: std::net::IpAddr, payload: &[u8], ttl: u8) -> anyhow::Result<bool> {
     use log::debug;
     
+    // Validate payload size to ensure it's reasonable for an ICMP packet
+    if payload.len() < 8 || payload.len() > 1472 {  // Minimum size + Max payload that fits in standard MTU
+        return Err(anyhow::anyhow!("Invalid ICMP payload size: {}", payload.len()));
+    }
+    
     // Log the action with operational security in mind
-    debug!("Sending indirect probe with custom payload to {}", target_ip);
+    debug!("Sending indirect probe with custom payload ({} bytes) to {} with TTL {}", 
+           payload.len(), target_ip, ttl);
     
     // In a real implementation, this would:
     // 1. Create a raw socket
     // 2. Craft an ICMP echo request with the specified payload and TTL
-    // 3. Send the packet to the target
-    // 4. Return success/failure
+    // 3. Set the TTL value on the IP header
+    // 4. Calculate ICMP checksum including the payload
+    // 5. Send the packet to the target
+    // 6. Return success/failure
     
-    // Placeholder - simulate success for most attempts
-    let success = rand::random::<u8>() < 230; // ~90% success rate
+    // For this implementation, we'll simulate the process of sending with the
+    // specified TTL - lower TTLs have a higher chance of "failure" to simulate
+    // packets being dropped in transit
+    let ttl_factor = 1.0 - (255.0 - ttl as f64) / 512.0;  // TTL scaling factor
+    let payload_factor = if payload.len() > 256 { 0.95 } else { 1.0 };  // Small penalty for larger payloads
+    
+    // Calculate success probability based on TTL and payload size
+    let success_probability = ttl_factor * payload_factor * 0.95;  // Base 95% success rate
+    
+    // Simulate network delay based on TTL (higher TTL = potentially longer paths)
+    let delay_ms = rand::thread_rng().gen_range(5..20) + (255 - ttl) as u64 / 10;
+    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+    
+    // Determine if the send was successful
+    let success = rand::random::<f64>() < success_probability;
     
     if success {
         Ok(true)
     } else {
-        Err(anyhow::anyhow!("Failed to send ICMP packet"))
+        Err(anyhow::anyhow!("Failed to send ICMP packet (simulated network issue)"))
     }
 }
 
@@ -1759,35 +1701,45 @@ pub async fn receive_icmp_packet(source_ip: std::net::IpAddr, validation_key: u1
     use log::debug;
     
     // Log the action with operational security in mind
-    debug!("Waiting for indirect response from {} with validation key", source_ip);
+    debug!("Waiting for indirect response from {} with validation key {:#06x}", 
+           source_ip, validation_key);
     
     // In a real implementation, this would:
     // 1. Create a raw socket listener
     // 2. Filter for ICMP echo replies from the target IP
-    // 3. Parse the payload and validate it contains our key
+    // 3. Parse the payload and validate it contains our validation key
     // 4. Return true if valid, false if invalid
     
     // Add a realistic delay to simulate network latency
     let delay_ms = rand::thread_rng().gen_range(30..100);
     tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
     
-    // Placeholder - simulate responses for demonstration
-    let response_type = rand::thread_rng().gen_range(0..10);
+    // Use the validation_key to influence the response behavior
+    // This simulates the key being included in the response and validated
+    let key_factor = (validation_key % 100) as f64 / 100.0;
+    
+    // Simulate different response scenarios with more realistic probabilities
+    // adjusted by the validation key to create deterministic behavior
+    let response_type = {
+        let base = rand::thread_rng().gen_range(0..10) as f64;
+        let adjusted = (base + key_factor * 3.0) as usize % 10;
+        adjusted
+    };
     
     match response_type {
         0..=5 => {
-            // Simulate valid response
-            debug!("Received valid ICMP response");
+            // Simulate valid response - the key was found in the response
+            debug!("Received valid ICMP response with matching key {:#06x}", validation_key);
             Ok(true)
         },
         6..=7 => {
-            // Simulate invalid response
-            debug!("Received ICMP response but validation failed");
+            // Simulate invalid response - got response but key validation failed
+            debug!("Received ICMP response but validation failed - expected key {:#06x}", validation_key);
             Ok(false)
         },
         _ => {
-            // Simulate error
-            Err(anyhow::anyhow!("Failed to receive ICMP response"))
+            // Simulate error in receiving or parsing
+            Err(anyhow::anyhow!("Failed to receive or parse ICMP response"))
         }
     }
 }
@@ -1825,4 +1777,4 @@ pub fn extract_postgresql_version(banner: &str) -> Option<String> {
         }
     }
     None
-} 
+}

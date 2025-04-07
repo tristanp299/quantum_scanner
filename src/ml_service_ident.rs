@@ -35,6 +35,8 @@ pub struct ServiceFeatureVector {
     pub max_line_length: f32,
     /// Number of lines
     pub line_count: f32,
+    /// Number of null bytes (important for binary protocols)
+    pub null_count: f32,
     
     // Binary features (presence/absence)
     /// Contains version number pattern
@@ -176,6 +178,7 @@ impl ServiceFeatureVector {
             avg_line_length,
             max_line_length,
             line_count,
+            null_count: 0.0,
             
             has_version_number: version_regex.is_match(banner),
             has_server_id: server_id_regex.is_match(banner),
@@ -206,6 +209,12 @@ impl ServiceFeatureVector {
     }
     
     /// Create service feature vector from binary data
+    /// 
+    /// This method analyzes binary protocol data to create a feature vector
+    /// that can be used for service identification.
+    /// 
+    /// For operational security, we use statistical analysis rather than
+    /// signature matching to avoid detection by security monitoring tools.
     pub fn from_binary(
         data: &[u8], 
         port: u16, 
@@ -213,11 +222,14 @@ impl ServiceFeatureVector {
         immediate_close: bool,
         server_initiated: bool
     ) -> Self {
-        // Convert to string if possible, otherwise use placeholder
+        // Convert to string if possible for some text-based analysis
+        // For binary protocols, this will contain many non-printable chars
         let banner = String::from_utf8(data.to_vec())
             .unwrap_or_else(|_| format!("[Binary data of length {}]", data.len()));
         
         // Calculate binary-specific features
+        // For operational security, we analyze statistical properties
+        // rather than using specific signatures that could be flagged
         let response_length = data.len() as f32;
         
         // Basic character analysis
@@ -230,18 +242,24 @@ impl ServiceFeatureVector {
         let printable_ratio = if response_length > 0.0 { printable_count / response_length } else { 0.0 };
         let binary_ratio = if response_length > 0.0 { (response_length - ascii_count) / response_length } else { 0.0 };
         
-        // Byte frequency analysis for entropy
+        // Byte frequency analysis for entropy calculation
+        // High entropy indicates encryption or compression
+        // Low entropy with structure indicates a binary protocol
         let mut byte_freq = HashMap::new();
         for b in data {
             *byte_freq.entry(*b).or_insert(0) += 1;
         }
         
+        // Calculate Shannon entropy - a measure of randomness in the data
+        // Encrypted data typically has entropy > 7.0
+        // Compressed data typically has entropy > 6.5
+        // Structured binary protocols typically have entropy between 3.0-6.0
         let entropy = byte_freq.values().fold(0.0, |acc, &count| {
             let p = count as f32 / response_length;
             acc - p * p.log2()
         });
         
-        // Use banner analysis for text-derived features
+        // Use text-based analysis first to extract common features
         let mut text_features = Self::from_banner(&banner, port, response_time_ms, immediate_close, server_initiated);
         
         // Override with binary-specific features
@@ -249,6 +267,62 @@ impl ServiceFeatureVector {
         text_features.printable_ratio = printable_ratio;
         text_features.entropy = entropy;
         text_features.has_binary = binary_indicator;
+        text_features.null_count = null_count;
+        
+        // Use null_count to help identify binary protocols with null-padding
+        if null_count > 0.0 {
+            // Binary formats often contain null bytes for padding or as delimiters
+            let null_ratio = null_count / response_length;
+            
+            // Adjust entropy interpretation based on null byte presence
+            // High null ratio with non-zero binary_ratio suggests a structured binary format
+            if null_ratio > 0.1 && binary_ratio > 0.0 {
+                // This is characteristic of many binary protocols like MySQL, SMB, etc.
+                text_features.has_binary = true;
+                
+                // For operational security, we don't log specific protocol detection
+                // but adjust our analysis based on characteristics
+                
+                // Binary protocols don't use these text-based formats
+                text_features.has_html = false;
+                text_features.has_xml = false;
+                text_features.has_json = false;
+            }
+        }
+        
+        // Use binary_ratio to improve classification accuracy
+        if binary_ratio > 0.0 {
+            // Greater than 20% binary data strongly indicates binary protocol
+            if binary_ratio > 0.2 {
+                text_features.has_binary = true;
+                
+                // Adjust entropy interpretation based on binary ratio
+                // Binary protocols with structure tend to have specific entropy ranges
+                if binary_ratio > 0.8 && entropy < 6.0 {
+                    // This pattern suggests a structured binary protocol rather than
+                    // encrypted data (which would have higher entropy)
+                    text_features.has_server_id = true;  // Many binary protocols include server identification
+                }
+            }
+        }
+        
+        // Advanced protocol detection heuristics for red team operations
+        // These patterns help identify specific protocol families
+        
+        // Database protocol detection
+        if (null_count > 5.0 && response_length < 100.0) || 
+           (port == 3306 || port == 5432 || port == 1433) {
+            // Probable database protocol (MySQL, PostgreSQL, MSSQL)
+            text_features.has_server_id = true;
+        }
+        
+        // TLS/SSL detection
+        if (response_length > 5.0 && data[0] == 0x16 && data[1] <= 0x03) ||
+           (port == 443 || port == 8443) {
+            // Probable TLS handshake
+            text_features.has_binary = true;
+            text_features.has_server_id = true;
+        }
         
         text_features
     }
@@ -339,6 +413,7 @@ impl MlServiceIdentifier {
             avg_line_length: 30.0,
             max_line_length: 80.0,
             line_count: 10.0,
+            null_count: 0.0,
             
             has_version_number: true,
             has_server_id: true,
@@ -399,6 +474,7 @@ impl MlServiceIdentifier {
             avg_line_length: 25.0,
             max_line_length: 25.0,
             line_count: 1.0,
+            null_count: 0.0,
             
             has_version_number: true,
             has_server_id: true,
@@ -447,6 +523,7 @@ impl MlServiceIdentifier {
             avg_line_length: 40.0,
             max_line_length: 40.0,
             line_count: 1.0,
+            null_count: 0.0,
             
             has_version_number: true,
             has_server_id: true,
@@ -490,6 +567,7 @@ impl MlServiceIdentifier {
             avg_line_length: 50.0,
             max_line_length: 50.0,
             line_count: 1.0,
+            null_count: 0.0,
             
             has_version_number: true,
             has_server_id: true,
@@ -533,6 +611,7 @@ impl MlServiceIdentifier {
             avg_line_length: 0.0,
             max_line_length: 0.0,
             line_count: 0.0,
+            null_count: 0.0,
             
             has_version_number: true,
             has_server_id: false,
@@ -819,6 +898,11 @@ impl MlServiceIdentifier {
     }
     
     /// Identify service from binary data
+    ///
+    /// This function analyzes binary protocol responses to identify the service type.
+    /// For operational security, this approach avoids using predefined signatures that
+    /// could be flagged by defensive measures. Instead, it uses statistical analysis
+    /// of response characteristics to identify services.
     pub fn identify_binary_service(
         &self,
         data: &[u8],
@@ -827,59 +911,124 @@ impl MlServiceIdentifier {
         immediate_close: bool,
         server_initiated: bool
     ) -> Option<(String, Option<String>)> {
-        // Check for common binary protocol signatures
-        // (This would be expanded in a real implementation)
-        
-        // MySQL
-        if port == 3306 && data.len() >= 4 && data[0] == 0x4a && data[1] == 0x00 {
-            let version = if data.len() >= 12 {
-                let version_str = String::from_utf8_lossy(&data[5..12]);
-                Some(format!("MySQL {}", version_str))
-            } else {
-                Some("MySQL".to_string())
-            };
-            
-            return Some(("mysql".to_string(), version));
-        }
-        
-        // PostgreSQL
-        if port == 5432 && data.len() >= 4 && data[0] == 0x52 {
-            return Some(("postgresql".to_string(), None));
-        }
-        
-        // TLS/SSL
-        if data.len() > 5 && data[0] == 0x16 && data[1] == 0x03 {
-            // TLS handshake
-            return Some(("tls".to_string(), None));
-        }
-        
-        // Fall back to feature-based analysis
+        // First, create a feature vector from the binary data
+        // This extracts statistical properties without relying on exact pattern matching
         let features = ServiceFeatureVector::from_binary(
-            data, port, response_time_ms, immediate_close, server_initiated
+            data, 
+            port, 
+            response_time_ms, 
+            immediate_close, 
+            server_initiated
         );
         
-        // Use the same KNN approach as for text data
-        // Calculate distances to known fingerprints
-        let mut distances = Vec::new();
+        // Log minimal information for operational security
+        // Avoid logging the actual binary data which could contain sensitive information
+        debug!("Analyzing binary protocol response on port {} - Length: {}, Entropy: {:.2}, Binary: {}", 
+               port, data.len(), features.entropy, features.has_binary);
         
+        // First attempt a quick identification based on port number and obvious indicators
+        // This is faster and often sufficient for common services
+        if let Some(service_name) = self.quick_identify(&features) {
+            // For OpSec, we use a sanitized string representation that doesn't include
+            // the entire binary payload in logs
+            let banner = String::from_utf8_lossy(data);
+            
+            // Try to extract the version from any ASCII parts of the response
+            let version = self.extract_version(service_name, &banner);
+            
+            return Some((service_name.to_string(), version));
+        }
+        
+        // If quick identification didn't work, proceed with more detailed analysis
+        // Calculate distance-based similarity to all known service fingerprints
+        let mut best_match: Option<(String, f32)> = None;
+        let mut best_distance = f32::MAX;
+        
+        // For operational security, we iterate through all fingerprints to maintain
+        // consistent timing regardless of whether we find a match quickly
         for (service_name, fingerprints) in &self.fingerprints {
             for fingerprint in fingerprints {
-                let distance = self.calculate_distance(&features, fingerprint);
-                distances.push((service_name.clone(), distance));
+                // Calculate vector distance using specialized weights for binary protocols
+                let mut distance = self.calculate_distance(&features, fingerprint);
+                
+                // Apply heuristic adjustments for binary protocols to improve accuracy
+                // This is important for red team operations where false positives could
+                // lead to incorrect assumptions about target systems
+                if features.has_binary {
+                    // Reduce distance (increase similarity) for services commonly using binary protocols
+                    if service_name == "tls" || 
+                       service_name == "ssl" || 
+                       service_name == "rdp" || 
+                       service_name == "mysql" || 
+                       service_name == "smb" {
+                        distance *= 0.8;  // 20% boost in confidence for known binary protocols
+                    }
+                    
+                    // Further adjust based on entropy comparison
+                    // Binary protocols have characteristic entropy signatures
+                    let entropy_diff = (features.entropy - fingerprint.entropy).abs();
+                    if entropy_diff < 1.0 {
+                        distance *= 0.9;  // 10% boost for matching entropy profile
+                    }
+                    
+                    // Port-based adjustment - higher confidence when on standard ports
+                    if features.port == fingerprint.port {
+                        distance *= 0.85;  // 15% boost for standard port match
+                    }
+                }
+                
+                // Track the best match we've found so far
+                if distance < best_distance {
+                    best_distance = distance;
+                    best_match = Some((service_name.clone(), distance));
+                }
             }
         }
         
-        // Sort by distance (closest first)
-        distances.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Use a more permissive threshold for binary protocols
+        // Binary protocols often have more variance than text-based ones
+        let binary_threshold = 5.0;
         
-        // Check if we have any matches with reasonable distance
-        if !distances.is_empty() && distances[0].1 < 12.0 {
-            debug!("Binary data identified as {} (distance: {:.2})", distances[0].0, distances[0].1);
-            return Some((distances[0].0.clone(), None));
+        // If we found a match within our confidence threshold
+        if let Some((service_name, distance)) = best_match {
+            if distance < binary_threshold {
+                // Calculate a confidence score between 0-1 for operational assessment
+                let confidence = 1.0 - distance/binary_threshold;
+                debug!("Binary protocol identified as {} with confidence {:.2}", 
+                       service_name, confidence);
+                
+                // For red team operations, version information is highly valuable
+                // Try to extract version info from any readable text portions
+                let banner = String::from_utf8_lossy(data);
+                let version = self.extract_version(&service_name, &banner);
+                
+                return Some((service_name, version));
+            }
         }
         
-        // If nothing matches well, it's an unknown binary protocol
-        Some(("unknown-binary".to_string(), None))
+        // If no specific match was found, attempt to categorize based on characteristics
+        // This is still valuable information for red team operations
+        if features.has_binary {
+            if features.entropy > 7.0 {
+                // Very high entropy often indicates encryption or compression
+                // For red team operations, identifying encrypted channels is valuable
+                debug!("Detected high-entropy encrypted protocol on port {}", port);
+                return Some(("encrypted".to_string(), None));
+            } else if features.printable_ratio < 0.2 {
+                // Mostly binary data with very few printable characters
+                // Classic binary protocol signature
+                debug!("Detected binary protocol on port {}", port);
+                return Some(("binary-protocol".to_string(), None));
+            } else if features.null_count > 10.0 && features.printable_ratio > 0.4 {
+                // Mixed binary and text with null bytes - often indicates
+                // a database protocol or similar structured binary format
+                debug!("Detected structured binary protocol on port {}", port);
+                return Some(("structured-binary".to_string(), None));
+            }
+        }
+        
+        // No confident identification possible
+        None
     }
 }
 

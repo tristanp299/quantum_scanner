@@ -122,45 +122,35 @@ pub async fn icmp_tunnel_scan(
     timeout_duration: Duration,
     _local_ip: Option<IpAddr>,
 ) -> Result<PortStatus> {
-    // Log the tunneling attempt with OPSEC-focused wording
-    debug!("Initiating indirect network analysis via ICMP tunnel toward {} port {}", target_ip, port);
+    // Create a unique key for this scan to validate responses
+    let key = ((port as u16) ^ 0xFFFF) & 0x7FFF;
     
-    // Generate pseudo-random delay to appear more like legitimate traffic
-    // Generate this BEFORE the async part to avoid thread_rng issues across awaits
-    let delay_ms = {
-        let mut rng = thread_rng();
-        rng.gen_range(50..150)
-    };
+    // Create ICMP payload with port information and validation key
+    // For added operational security, we encode this to avoid trivial detection
+    let mut payload = Vec::with_capacity(64); // Use standard ICMP size for stealth
     
-    // Construct ICMP payload that includes our port target
-    // Use a format that appears potentially legitimate to evade basic DPI
-    // By encoding our port number in what looks like a timestamp section
-    // Common format: 8 bytes of timestamp + port (encoded) + random padding
-    let mut payload = Vec::with_capacity(56); // Standard ping size
+    // Add encoded port (using bitwise operations to obfuscate)
+    payload.push(((port >> 8) & 0xFF) as u8);
+    payload.push((port & 0xFF) as u8);
     
-    // Current timestamp for first 8 bytes (standard ping format)
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    // Add encoded key - XOR with a fixed value for simple obfuscation
+    payload.push(((key >> 8) ^ 0x55) as u8);
+    payload.push((key & 0xFF) as u8);
     
-    // Add timestamp to look like a standard ping
-    payload.extend_from_slice(&now.to_be_bytes());
+    // Add command indicator (1 = port scan)
+    payload.push(1);
     
-    // Encode target port in next 2 bytes, but slightly obfuscated
-    // XOR the port with a fixed key derived from timestamp
-    let key = ((now & 0xFF) as u16) | 0x0100;
-    let encoded_port = port ^ key;
-    payload.extend_from_slice(&encoded_port.to_be_bytes());
-    
-    // Fill remaining space with pseudo-random data to look like normal ping payload
-    // Use a fixed seed based on timestamp to ensure deterministic behavior
-    let mut random_bytes = vec![0u8; 46]; // 56 - 8 - 2 = 46
+    // Add random padding to prevent fingerprinting of our probe packets
+    let padding_length = thread_rng().gen_range(24..44); // Random but reasonable size
+    let mut random_bytes = vec![0u8; padding_length];
     {
         let mut rng = thread_rng();
         rng.fill(&mut random_bytes[..]);
     }
     payload.extend_from_slice(&random_bytes);
+    
+    // Generate a pseudo-random delay to appear more like legitimate traffic
+    let delay_ms = thread_rng().gen_range(50..150);
     
     // Apply the delay first, before any other async operations
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
@@ -170,6 +160,14 @@ pub async fn icmp_tunnel_scan(
     let ping_success = utils::send_icmp_packet(target_ip, &payload, 1)
         .await
         .unwrap_or(false);
+    
+    // If we couldn't even send the ICMP packet, log a warning
+    if !ping_success {
+        warn!("Failed to send ICMP tunnel packet to {}", target_ip);
+        return Ok(PortStatus::Filtered);
+    }
+    
+    debug!("ICMP tunnel packet sent successfully to {}", target_ip);
     
     // Wait for a potential response
     let response = timeout(

@@ -69,11 +69,17 @@ For custom Docker builds, you can also use build arguments directly:
 docker build --build-arg ENABLE_UPX=true --build-arg BYPASS_TLS_SECURITY=true .
 ```
 
+Build arguments available:
+- `ENABLE_UPX`: Set to `true` to apply UPX compression
+- `ULTRA_MINIMAL`: Set to `true` for extreme UPX compression
+- `BYPASS_TLS_SECURITY`: Set to `true` to bypass SSL/TLS certificate verification (for environments with self-signed certificates)
+
 ### Additional Build Options
 
 -   `--strip`: **(Recommended for Ops)** Removes debugging symbols from the binary. This significantly reduces file size and makes reverse engineering more difficult for defenders. (Enabled by default when using `--static`).
 -   `--compress`: Uses UPX (Ultimate Packer for Executables) to compress the binary. Reduces size, which can help with exfiltration or bypassing size-based detection rules. *Caution:* Compressed binaries can sometimes be flagged by antivirus software.
 -   `--ultra`: Applies more aggressive UPX compression. Further reduces size but increases the binary's startup time and potentially the risk of AV detection.
+-   `--insecure`: Bypasses TLS certificate verification during build. Essential for environments with self-signed certificates or corporate proxies that intercept SSL/TLS traffic. Use this option when encountering SSL certificate errors during the build process.
 -   `--debug`: Builds with debugging information included. **Only use for development purposes, never for actual operations.**
 -   `--clean`: Removes previous build artifacts before starting a new build. Good practice for ensuring a clean state.
 -   `--no-fix`: Skips the step where the build script might automatically adjust dependencies in `Cargo.toml`. For advanced users managing dependencies manually.

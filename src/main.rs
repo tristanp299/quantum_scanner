@@ -10,15 +10,17 @@ use std::io::{Read, Write};
 use serde_json;
 use std::net::IpAddr;
 
-mod scanner;
-mod models;
-mod techniques;
-mod utils;
-mod output;
+mod banner;
 mod http_analyzer;
-mod service_fingerprints;
-mod tunnel;
+mod minimal;
 mod ml_service_ident;
+mod models;
+mod output;
+mod scanner;
+mod service_fingerprints;
+mod techniques;
+mod tunnel;
+mod utils;
 
 use scanner::QuantumScanner;
 use models::{ScanType, PortRange, PortRanges, TopPorts};
@@ -134,6 +136,10 @@ struct Args {
     /// Scan the top 100 common ports
     #[clap(short = 'T', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
     top_100: bool,
+
+    /// Scan the top 10 most common ports (for quicker scans)
+    #[clap(short = 't', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
+    top_10: bool,
 
     /// Use IPv6
     #[clap(short = '6', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
@@ -266,6 +272,10 @@ struct Args {
     /// Output results in JSON format
     #[clap(short = 'j', long, group = "output_options", help_heading = "OUTPUT OPTIONS")]
     json: bool,
+
+    /// Format the raw JSON output for pretty printing (with indentation)
+    #[clap(long = "pretty-json", group = "output_options", help_heading = "OUTPUT OPTIONS")]
+    pretty_json: bool,
 
     /// Write results to file
     #[clap(short, long, group = "output_options", help_heading = "OUTPUT OPTIONS")]
@@ -958,8 +968,12 @@ async fn main() -> Result<(), anyhow::Error> {
         println!("[{}+{}] Enhanced evasion techniques enabled", colors.green, colors.reset);
     }
     
-    // Handle port selection, prioritizing top_100 over ports parameter if specified
-    let ports_to_scan: Vec<u16> = if args.top_100 {
+    // Handle port selection, prioritizing top_10, then top_100 over ports parameter if specified
+    let ports_to_scan: Vec<u16> = if args.top_10 {
+        let top_ports = TopPorts::top_10();
+        println!("[{}+{}] Using top 10 most common ports for quick scanning", colors.green, colors.reset);
+        top_ports
+    } else if args.top_100 {
         let top_ports = TopPorts::top_100();
         println!("[{}+{}] Using top 100 common ports for scanning", colors.green, colors.reset);
         top_ports
@@ -1008,7 +1022,6 @@ async fn main() -> Result<(), anyhow::Error> {
         args.evasion || args.enhanced_evasion,
         args.verbose,
         args.ipv6,
-        args.json,
         args.timeout,
         args.timeout_connect,
         args.timeout_banner,
@@ -1047,10 +1060,15 @@ async fn main() -> Result<(), anyhow::Error> {
         colors.green, colors.reset, results.open_ports.len());
     
     // Display results based on output mode
-    if args.json {
+    if args.json || args.pretty_json {
         // If JSON output is requested, serialize and display the results
-        let json_output = serde_json::to_string_pretty(&results)
-            .unwrap_or_else(|e| format!("Error serializing to JSON: {}", e));
+        let json_output = if args.pretty_json {
+            serde_json::to_string_pretty(&results)
+                .unwrap_or_else(|e| format!("Error serializing to JSON: {}", e))
+        } else {
+            serde_json::to_string(&results)
+                .unwrap_or_else(|e| format!("Error serializing to JSON: {}", e))
+        };
         println!("\n{}", json_output);
     } else if args.verbose {
         // Display enhanced scan details using the print_results function
@@ -1111,7 +1129,7 @@ async fn main() -> Result<(), anyhow::Error> {
     
     // Output to file if requested
     if let Some(output_path) = args.output {
-        if args.json {
+        if args.json || args.pretty_json {
             output::save_json_results(&results, &output_path)?;
             println!("[{}+{}] Results saved to {} in JSON format", 
                 colors.green, colors.reset, output_path.display());

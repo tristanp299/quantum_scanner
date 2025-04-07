@@ -233,6 +233,11 @@ impl PortRange {
     pub fn parse(port_str: &str) -> Result<Vec<Self>, PortRangeError> {
         let mut ranges = Vec::new();
         
+        // Check for empty input
+        if port_str.trim().is_empty() {
+            return Err(PortRangeError::InvalidFormat("Empty port specification".to_string()));
+        }
+        
         for part in port_str.split(',') {
             let part = part.trim();
             if part.is_empty() {
@@ -244,6 +249,13 @@ impl PortRange {
                 let mut parts = part.split('-');
                 let start_str = parts.next().unwrap_or("");
                 let end_str = parts.next().unwrap_or("");
+                
+                // Check if there are too many parts in the range (like "80-443-8000")
+                if parts.next().is_some() {
+                    return Err(PortRangeError::InvalidFormat(
+                        format!("Invalid port range format: {} (expected format: start-end)", part)
+                    ));
+                }
                 
                 // Parse start port
                 let start = match start_str.parse::<u16>() {
@@ -262,6 +274,13 @@ impl PortRange {
                     return Err(PortRangeError::RangeStartGreaterThanEnd(start, end));
                 }
                 
+                // Validate range size to prevent excessive memory usage
+                if end - start > 10000 {
+                    return Err(PortRangeError::InvalidRange(
+                        format!("Port range {}-{} is too large (max 10000 ports per range)", start, end)
+                    ));
+                }
+                
                 ranges.push(PortRange::Range(start, end));
             } else {
                 // Parse as single port
@@ -270,6 +289,10 @@ impl PortRange {
                     Err(_) => return Err(PortRangeError::InvalidPort(part.to_string())),
                 }
             }
+        }
+        
+        if ranges.is_empty() {
+            return Err(PortRangeError::InvalidFormat("No valid port ranges specified".to_string()));
         }
         
         Ok(ranges)

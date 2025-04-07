@@ -19,6 +19,7 @@ COMPRESS_BINARY=false    # Whether to use UPX compression
 ULTRA_MINIMAL=false      # Whether to use extreme UPX compression
 CLEAN_ARTIFACTS=false    # Whether to clean build artifacts
 STATIC_BUILD=false       # Whether to build a fully static binary using Docker
+BYPASS_TLS_SECURITY=false # Whether to bypass TLS certificate verification
 
 # ======================================================================
 # FUNCTIONS
@@ -51,6 +52,7 @@ show_help() {
     echo "  -u, --ultra           Apply ultra compression (very slow startup)"
     echo "  --static              Build 100% static binary using Docker"
     echo "  --clean               Clean build artifacts before building"
+    echo "  --insecure            Bypass TLS certificate verification (for proxy environments)"
     echo ""
     echo -e "${BLUE}Examples:${NC}"
     echo "  $0                    Build in release mode (default)"
@@ -59,6 +61,7 @@ show_help() {
     echo "  $0 --static           Build 100% static binary with Docker"
     echo "  $0 --static --compress Build static binary with UPX compression"
     echo "  $0 --static --ultra   Build static binary with extreme compression"
+    echo "  $0 --insecure         Build with TLS verification disabled (for corporate proxies)"
     echo ""
 }
 
@@ -92,6 +95,11 @@ parse_args() {
                 CLEAN_ARTIFACTS=true
                 shift
                 ;;
+            --insecure)
+                BYPASS_TLS_SECURITY=true
+                echo -e "${YELLOW}[!] TLS certificate verification disabled - USE WITH CAUTION${NC}"
+                shift
+                ;;
             *)
                 echo -e "${RED}Unknown option:${NC} $1"
                 show_help
@@ -113,6 +121,33 @@ clean_artifacts() {
     return 0
 }
 
+# Function to configure insecure connections if needed
+configure_tls_bypass() {
+    if [ "$BYPASS_TLS_SECURITY" = true ]; then
+        echo -e "${YELLOW}[!] Setting up TLS certificate verification bypass...${NC}"
+        
+        # Configure git to ignore SSL verification globally
+        git config --global http.sslVerify false
+        
+        # Create cargo config to bypass certificate checks
+        mkdir -p ~/.cargo
+        cat > ~/.cargo/config.toml << EOF
+[http]
+check-revoke = false
+
+[net]
+retry = 10
+git-fetch-with-cli = true
+EOF
+        
+        # Also set the environment variables for this session
+        export CARGO_HTTP_CHECK_REVOKE=false
+        export CARGO_NET_GIT_FETCH_WITH_CLI=true
+        
+        echo -e "${YELLOW}[!] TLS certificate verification has been disabled for this build${NC}"
+    fi
+}
+
 # Function to build the project using standard cargo
 build_project() {
     echo -e "${BLUE}[*] Building project in release mode...${NC}"
@@ -122,6 +157,9 @@ build_project() {
         echo -e "${YELLOW}[!] libpcap-dev not found, installing...${NC}"
         sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
     fi
+    
+    # Configure TLS bypass if needed
+    configure_tls_bypass
     
     # Run the build
     if cargo build --release; then
@@ -169,7 +207,13 @@ build_static() {
     fi
     
     # Set up build arguments for Docker
-    DOCKER_BUILD_ARGS="--build-arg BYPASS_TLS_SECURITY=true"
+    DOCKER_BUILD_ARGS=""
+    
+    # Add TLS bypass if needed
+    if [ "$BYPASS_TLS_SECURITY" = true ]; then
+        DOCKER_BUILD_ARGS="$DOCKER_BUILD_ARGS --build-arg BYPASS_TLS_SECURITY=true"
+        echo -e "${YELLOW}[!] TLS certificate verification will be disabled in Docker build${NC}"
+    fi
     
     # Add compression flags if needed
     if [ "$COMPRESS_BINARY" = true ]; then
@@ -229,6 +273,9 @@ build_static_directly() {
     
     # Ensure rustup is installed
     ensure_rustup
+    
+    # Configure TLS bypass if needed
+    configure_tls_bypass
     
     # Add musl target if rustup is available
     if command -v rustup &> /dev/null; then
