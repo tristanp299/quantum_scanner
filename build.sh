@@ -203,64 +203,98 @@ build_project() {
         sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
     fi
     
-    # We need musl-tools for all builds now to avoid proc-macro issues
-    if ! command -v musl-gcc &> /dev/null; then
-        echo -e "${YELLOW}[!] Installing musl-tools...${NC}"
-        sudo apt-get update -qq && sudo apt-get install -y musl-tools musl-dev
-    fi
-    
-    # Ensure rustup is installed
-    ensure_rustup
-    
-    # Add musl target 
-    echo -e "${BLUE}[*] Adding musl target...${NC}"
-    rustup target add x86_64-unknown-linux-musl
-    
     # Configure TLS bypass if needed
     if [ "$BYPASS_TLS_SECURITY" = true ]; then
         configure_tls_bypass
     fi
     
-    # Clean first to avoid previous build artifacts (optional)
-    cargo clean || true
-    
-    # Save the original Cargo.toml if using insecure mode
-    cp Cargo.toml Cargo.toml.bak
-    
-    # Set FEATURES based on whether insecure mode is enabled
+    # Run the build with SSL environment variables if needed
     if [ "$BYPASS_TLS_SECURITY" = true ]; then
+        # Clean first if this is an insecure build to avoid previous build artifacts
+        cargo clean || true
+        
+        # Save the original Cargo.toml
+        cp Cargo.toml Cargo.toml.bak
+        
+        # Modify Cargo.toml to use minimal features and insecure-tls feature
         echo -e "${BLUE}[*] Modifying Cargo.toml for insecure build...${NC}"
         sed -i 's/default = \["full"\]/default = \["minimal-static", "insecure-tls"\]/' Cargo.toml
-        FEATURES="--no-default-features --features minimal-static,insecure-tls"
+        
+        # Use RUSTFLAGS to specifically disable certificate verification
+        echo -e "${BLUE}[*] Building with SSL verification disabled...${NC}"
+        RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" cargo build --release --no-default-features --features "minimal-static,insecure-tls"
+        BUILD_RESULT=$?
+        
+        # If first attempt fails, try with additional flags
+        if [ $BUILD_RESULT -ne 0 ]; then
+            echo -e "${YELLOW}[!] First build attempt failed, trying with additional flags...${NC}"
+            RUSTC_BOOTSTRAP=1 RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" cargo build --release --no-default-features --features "minimal-static,insecure-tls"
+            BUILD_RESULT=$?
+        fi
+        
+        # Restore original Cargo.toml regardless of build result
+        mv Cargo.toml.bak Cargo.toml
+        
+        if [ $BUILD_RESULT -eq 0 ]; then
+            echo -e "${GREEN}[+] Insecure build completed successfully${NC}"
+            cp target/release/quantum_scanner ./quantum_scanner
+            chmod +x ./quantum_scanner
+            return 0
+        else
+            echo -e "${RED}[!] Insecure build failed${NC}"
+            return 1
+        fi
     else
-        FEATURES=""
-    fi
-    
-    # Build with musl target to avoid proc-macro issues, using appropriate flags
-    echo -e "${BLUE}[*] Building with musl target...${NC}"
-    
-    if [ "$BYPASS_TLS_SECURITY" = true ]; then
-        RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" RUSTUP_TLS_VERIFY_NONE=1 \
-        cargo build --release --target=x86_64-unknown-linux-musl $FEATURES
-    else
-        RUSTFLAGS="-C target-feature=+crt-static" \
-        cargo build --release --target=x86_64-unknown-linux-musl $FEATURES
-    fi
-    
-    BUILD_RESULT=$?
-    
-    # Restore original Cargo.toml
-    mv Cargo.toml.bak Cargo.toml
-    
-    if [ $BUILD_RESULT -eq 0 ]; then
-        echo -e "${GREEN}[+] Build completed successfully${NC}"
-        cp target/x86_64-unknown-linux-musl/release/quantum_scanner ./quantum_scanner
-        chmod +x ./quantum_scanner
-        return 0
-    else
-        echo -e "${RED}[!] Build failed${NC}"
-        echo -e "${RED}[!] Try building with --static --insecure flags instead${NC}"
-        return 1
+        # Standard build - capture output to check for SSL errors
+        BUILD_OUTPUT=$(cargo build --release 2>&1)
+        BUILD_RESULT=$?
+        
+        if [ $BUILD_RESULT -eq 0 ]; then
+            echo -e "${GREEN}[+] Build completed successfully${NC}"
+            cp target/release/quantum_scanner ./quantum_scanner
+            chmod +x ./quantum_scanner
+            return 0
+        else
+            # Check if the error is SSL related
+            if echo "$BUILD_OUTPUT" | grep -q "SSL CA cert\|certificate verify\|SSL connection\|HTTPS protocol error"; then
+                echo -e "${YELLOW}[!] SSL certificate verification issue detected during build${NC}"
+                echo -e "${YELLOW}[!] Retrying build with SSL verification disabled...${NC}"
+                
+                # Enable SSL bypass and try again
+                BYPASS_TLS_SECURITY=true
+                configure_tls_bypass
+                
+                # Save the original Cargo.toml
+                cp Cargo.toml Cargo.toml.bak
+                
+                # Modify Cargo.toml for insecure build
+                echo -e "${BLUE}[*] Modifying Cargo.toml for insecure build...${NC}"
+                sed -i 's/default = \["full"\]/default = \["minimal-static", "insecure-tls"\]/' Cargo.toml
+                
+                # Build with SSL verification disabled
+                echo -e "${BLUE}[*] Building with SSL verification disabled...${NC}"
+                RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" cargo build --release --no-default-features --features "minimal-static,insecure-tls"
+                BUILD_RESULT=$?
+                
+                # Restore original Cargo.toml
+                mv Cargo.toml.bak Cargo.toml
+                
+                if [ $BUILD_RESULT -eq 0 ]; then
+                    echo -e "${GREEN}[+] Build with SSL bypass completed successfully${NC}"
+                    cp target/release/quantum_scanner ./quantum_scanner
+                    chmod +x ./quantum_scanner
+                    return 0
+                else
+                    echo -e "${RED}[!] Build failed even with SSL bypass${NC}"
+                    return 1
+                fi
+            else
+                echo -e "${RED}[!] Build failed${NC}"
+                echo -e "${RED}[!] Error output:${NC}"
+                echo -e "$BUILD_OUTPUT" | tail -n 20
+                return 1
+            fi
+        fi
     fi
 }
 
@@ -272,9 +306,9 @@ ensure_rustup() {
         # Use insecure flag for rustup installation if TLS bypass is enabled
         if [ "$BYPASS_TLS_SECURITY" = true ]; then
             echo -e "${YELLOW}[!] Installing rustup with insecure mode${NC}"
-            curl -k --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | RUSTUP_TLS_VERIFY_NONE=1 sh -s -- -y
+            curl -k --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | RUSTUP_TLS_VERIFY_NONE=1 sh -s -- -y --default-toolchain stable
         else
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
         fi
         
         source "$HOME/.cargo/env"
@@ -284,7 +318,46 @@ ensure_rustup() {
             echo -e "${RED}[!] Failed to install rustup. Using system cargo only.${NC}"
             return 1
         fi
+    else
+        # Rustup is installed but might not have a default toolchain
+        echo -e "${BLUE}[*] Checking rustup default toolchain...${NC}"
+        
+        # Check if rustup has a default toolchain
+        if ! rustup default 2>/dev/null | grep -q "stable\|nightly\|beta"; then
+            echo -e "${YELLOW}[!] No default rustup toolchain found, installing stable...${NC}"
+            if [ "$BYPASS_TLS_SECURITY" = true ]; then
+                RUSTUP_TLS_VERIFY_NONE=1 rustup default stable
+            else
+                rustup default stable
+            fi
+        fi
     fi
+    
+    # Ensure we have a default toolchain 
+    echo -e "${BLUE}[*] Verifying rustup default toolchain...${NC}"
+    if ! rustup default 2>/dev/null | grep -q "stable\|nightly\|beta"; then
+        echo -e "${RED}[!] Failed to set default rustup toolchain.${NC}"
+        echo -e "${YELLOW}[!] Attempting to install stable toolchain...${NC}"
+        
+        # Try direct installation of stable toolchain
+        if [ "$BYPASS_TLS_SECURITY" = true ]; then
+            RUSTUP_TLS_VERIFY_NONE=1 rustup toolchain install stable --profile minimal
+            RUSTUP_TLS_VERIFY_NONE=1 rustup default stable
+        else
+            rustup toolchain install stable --profile minimal
+            rustup default stable
+        fi
+        
+        # Final verification
+        if ! rustup default 2>/dev/null | grep -q "stable\|nightly\|beta"; then
+            echo -e "${RED}[!] Failed to configure rustup. Will attempt to continue with system cargo.${NC}"
+        else
+            echo -e "${GREEN}[+] Successfully configured rustup with stable toolchain${NC}"
+        fi
+    else
+        echo -e "${GREEN}[+] Rustup is configured with a default toolchain${NC}"
+    fi
+    
     return 0
 }
 
