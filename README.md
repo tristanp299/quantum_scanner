@@ -35,7 +35,7 @@ This scanner provides a range of capabilities tailored for sophisticated network
 
 ## Building Quantum Scanner
 
-The included `build.sh` script simplifies the compilation process.
+The `build.sh` script simplifies the compilation process with multiple options for different build scenarios.
 
 ### Standard Build
 
@@ -45,53 +45,78 @@ Compiles a standard dynamically linked executable.
 ./build.sh
 ```
 
-### Portable Build (Optimized Dynamic Linking)
+### Static Build
 
-Previously known as `--static`, this option now creates a portable binary using optimized *dynamic* linking. Full static linking with `musl` often caused compatibility issues across different Linux distributions. This approach offers broad compatibility while keeping the binary relatively self-contained. Ideal for running the scanner on various target systems without needing to install dependencies.
+Creates a fully static binary using musl-libc, suitable for running the scanner on various target systems without needing to install dependencies.
 
 ```bash
 ./build.sh --static
 ```
 
+### Build Options
+
+The build script supports multiple options:
+
+-   `--strip`: **(Recommended for Ops)** Removes debugging symbols from the binary. This significantly reduces file size and makes reverse engineering more difficult for defenders.
+-   `--compress`: Uses UPX (Ultimate Packer for Executables) to compress the binary. Reduces size, which can help with exfiltration or bypassing size-based detection rules.
+-   `--ultra`: Applies more aggressive UPX compression. Further reduces size but increases the binary's startup time.
+-   `--insecure`: Bypasses TLS certificate verification during build. Essential for environments with self-signed certificates or corporate proxies that intercept SSL/TLS traffic.
+-   `--clean`: Removes previous build artifacts before starting a new build. Good practice for ensuring a clean state.
+-   `--fix-docker`: Fixes Docker certificate issues for Docker-based static builds. Useful when running on security-focused distributions like Kali Linux.
+-   `--install-deps`: Automatically installs all required dependencies for building the project.
+-   `--nightly`: Uses Rust nightly toolchain instead of stable for the build.
+-   `--beta`: Uses Rust beta toolchain instead of stable for the build.
+-   `--force-remove-rust`: Removes existing system Rust installation if it conflicts with rustup.
+
 ### Docker-Based Builds
 
-The scanner can be built using Docker with a consolidated, security-focused Dockerfile. The build script automatically handles the Docker build process when using the `--static` option.
+The scanner can be built using Docker when using the `--static` option. Docker-based builds offer several advantages:
 
-Key Docker build features include:
-- Automatic adaptation to requested compression options (`--compress`, `--ultra`)
-- TLS/certificate issue workarounds for secure environments
-- Memory-optimized build flags for reliability
-- Fully static binary output using musl
-- Minimal final image based on scratch
+- Consistency across different build environments
+- Automatic handling of dependencies
+- Static binary output using musl
+- Better isolation from the host system
 
-For custom Docker builds, you can also use build arguments directly:
+If Docker is not available, the build script will automatically fall back to using direct musl compilation.
+
+### Examples
+
+Standard build with stripping and compression:
 ```bash
-docker build --build-arg ENABLE_UPX=true --build-arg BYPASS_TLS_SECURITY=true .
+./build.sh --strip --compress
 ```
 
-Build arguments available:
-- `ENABLE_UPX`: Set to `true` to apply UPX compression
-- `ULTRA_MINIMAL`: Set to `true` for extreme UPX compression
-- `BYPASS_TLS_SECURITY`: Set to `true` to bypass SSL/TLS certificate verification (for environments with self-signed certificates)
+Static build with extreme compression:
+```bash
+./build.sh --static --ultra
+```
 
-### Additional Build Options
+Build in an environment with SSL certificate issues:
+```bash
+./build.sh --insecure
+```
 
--   `--strip`: **(Recommended for Ops)** Removes debugging symbols from the binary. This significantly reduces file size and makes reverse engineering more difficult for defenders. (Enabled by default when using `--static`).
--   `--compress`: Uses UPX (Ultimate Packer for Executables) to compress the binary. Reduces size, which can help with exfiltration or bypassing size-based detection rules. *Caution:* Compressed binaries can sometimes be flagged by antivirus software.
--   `--ultra`: Applies more aggressive UPX compression. Further reduces size but increases the binary's startup time and potentially the risk of AV detection.
--   `--insecure`: Bypasses TLS certificate verification during build. Essential for environments with self-signed certificates or corporate proxies that intercept SSL/TLS traffic. Use this option when encountering SSL certificate errors during the build process.
--   `--debug`: Builds with debugging information included. **Only use for development purposes, never for actual operations.**
--   `--clean`: Removes previous build artifacts before starting a new build. Good practice for ensuring a clean state.
--   `--no-fix`: Skips the step where the build script might automatically adjust dependencies in `Cargo.toml`. For advanced users managing dependencies manually.
+Install dependencies and build:
+```bash
+./build.sh --install-deps
+```
 
-### Build Improvements Notes
+Fix Docker certificate issues and build a static binary:
+```bash
+sudo ./build.sh --fix-docker --static
+```
 
-The build process benefits from:
-- Optimized dependencies for faster compilation and smaller binaries.
-- Improved error handling during compilation.
-- Target-specific optimizations for better performance.
-- **RAM Disk Support:** Facilitates running operations from memory (see OpSec Guidance).
-- Docker integration for consistent builds in containerized environments.
+### Troubleshooting Common Build Issues
+
+If you encounter build failures, try these solutions:
+
+1. **SSL Certificate Issues**: Use the `--insecure` option to bypass SSL verification during the build process.
+2. **Docker Certificate Issues**: Run `sudo ./build.sh --fix-docker` to fix Docker certificate problems.
+3. **Rust Toolchain Problems**: If you have issues with rustup or the Rust toolchain, use `--force-remove-rust` to clean up existing installations.
+4. **Dependency Issues**: Run with `--install-deps` to automatically install all required dependencies.
+5. **Clean Build**: Use `--clean` to start with a fresh build environment.
+
+For remote managed hosts, the build script now includes automatic detection and handling of common issues including TLS verification, rustup configuration, and system dependencies.
 
 ## Usage
 
