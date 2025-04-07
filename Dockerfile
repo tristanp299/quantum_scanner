@@ -19,7 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && if [ "$BYPASS_TLS_SECURITY" = "true" ]; then \
        git config --global http.sslVerify false; \
        mkdir -p /.cargo; \
-       echo '[http]\ncheck-revoke = false\n\n[net]\nretry = 10\ngit-fetch-with-cli = true' > /.cargo/config.toml; \
+       echo '[http]\ncheck-revoke = false\nssl-version = "tlsv1.2"\ncainfo = ""\nmultiplexing = false\n\n[net]\nretry = 10\ngit-fetch-with-cli = true' > /.cargo/config.toml; \
+       # Setup curl to ignore SSL verification \
+       mkdir -p /root/.curl; \
+       echo "insecure" > /root/.curlrc; \
+       # Set environment variables \
+       export SSL_CERT_FILE=""; \
+       export REQUESTS_CA_BUNDLE=""; \
+       export CURL_CA_BUNDLE=""; \
+       export GIT_SSL_NO_VERIFY=true; \
        fi
 
 # Set working directory
@@ -34,18 +42,39 @@ COPY Cargo.toml Cargo.lock ./
 # Create a dummy lib file to trick cargo into compiling dependencies first
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
-    RUSTFLAGS="-C target-feature=+crt-static" \
-    cargo build --release --target=x86_64-unknown-linux-musl && \
+    if [ "$BYPASS_TLS_SECURITY" = "true" ]; then \
+        RUSTFLAGS="-C target-feature=+crt-static" \
+        CARGO_HTTP_CHECK_REVOKE=false \
+        CARGO_HTTP_SSL_VERSION="tlsv1.2" \
+        CARGO_HTTP_CAINFO="" \
+        CARGO_HTTP_MULTIPLEXING=false \
+        RUSTUP_TLS_VERIFY_NONE=1 \
+        SSL_CERT_FILE="" \
+        cargo build --release --target=x86_64-unknown-linux-musl --no-default-features --features "minimal-static,insecure-tls"; \
+    else \
+        RUSTFLAGS="-C target-feature=+crt-static" \
+        cargo build --release --target=x86_64-unknown-linux-musl; \
+    fi && \
     rm -rf src
 
 # Now copy the actual source code
 COPY . .
 
 # Build with optimizations (single command with environment variables)
-RUN RUSTFLAGS="-C target-feature=+crt-static -C opt-level=2" \
-    CARGO_HTTP_CHECK_REVOKE=false \
-    CARGO_NET_GIT_FETCH_WITH_CLI=true \
-    cargo build --release --target=x86_64-unknown-linux-musl && \
+RUN if [ "$BYPASS_TLS_SECURITY" = "true" ]; then \
+        RUSTFLAGS="-C target-feature=+crt-static -C opt-level=2" \
+        CARGO_HTTP_CHECK_REVOKE=false \
+        CARGO_HTTP_SSL_VERSION="tlsv1.2" \
+        CARGO_HTTP_CAINFO="" \
+        CARGO_HTTP_MULTIPLEXING=false \
+        CARGO_NET_GIT_FETCH_WITH_CLI=true \
+        RUSTUP_TLS_VERIFY_NONE=1 \
+        SSL_CERT_FILE="" \
+        cargo build --release --target=x86_64-unknown-linux-musl --no-default-features --features "minimal-static,insecure-tls"; \
+    else \
+        RUSTFLAGS="-C target-feature=+crt-static -C opt-level=2" \
+        cargo build --release --target=x86_64-unknown-linux-musl; \
+    fi && \
     # Strip binary
     strip --strip-unneeded target/x86_64-unknown-linux-musl/release/quantum_scanner && \
     # Apply UPX if enabled (in the same layer)

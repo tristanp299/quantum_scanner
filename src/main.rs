@@ -21,6 +21,7 @@ mod service_fingerprints;
 mod techniques;
 mod tunnel;
 mod utils;
+mod ssl_config;
 
 use scanner::QuantumScanner;
 use models::{ScanType, PortRange, PortRanges, TopPorts};

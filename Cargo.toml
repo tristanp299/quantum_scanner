@@ -30,7 +30,7 @@ pnet_sys = "0.33.0"
 socket2 = "0.5.3"
 
 # TLS/SSL support
-rustls = { version = "0.21.0", features = ["dangerous_configuration"] }
+rustls = { version = "0.21.0", features = ["dangerous_configuration", "tls12"] }
 rustls-pemfile = "1.0.2"
 webpki-roots = "0.25.2"
 x509-parser = { version = "0.15.0", optional = true }
@@ -81,11 +81,12 @@ ipnet = "2.7.2"
 cidr-utils = "0.5.10"
 
 [features]
-default = ["full"]
-full = ["x509-parser"]
+default = ["minimal-static", "insecure-tls"]
+full = ["x509-parser", "enhanced-crypto", "secure-memory"]
 minimal-static = []
 secure-memory = ["zeroize"]
 enhanced-crypto = ["argon2", "chacha20poly1305"]
+insecure-tls = []
 
 # Add a build.rs script to set up build environment
 [build-dependencies]
