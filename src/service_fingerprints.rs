@@ -179,7 +179,7 @@ impl ServiceFingerprints {
             21 => b"USER anonymous\r\n".to_vec(),
             22 => b"SSH-2.0-OpenSSH_8.4p1\r\n".to_vec(),
             23 => b"\r\n".to_vec(),
-            25 => b"EHLO quantum.scanner\r\n".to_vec(),
+            25 => b"EHLO test\r\n".to_vec(),
             80 | 443 | 8080 | 8443 => 
                 b"GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36\r\nAccept: */*\r\nConnection: close\r\n\r\n".to_vec(),
             110 => b"USER test\r\n".to_vec(),
