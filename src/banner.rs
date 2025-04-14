@@ -1,5 +1,4 @@
-use log::{debug, trace, warn};
-use std::io::prelude::*;
+use log::{debug, trace};
 use std::net::{IpAddr, SocketAddr};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -13,11 +12,11 @@ use anyhow::Result;
 /// various connection strategies are used to avoid detection.
 pub async fn grab_banner(target_ip: IpAddr, port: u16) -> Result<String> {
     let addr = SocketAddr::new(target_ip, port);
-    debug!("Initiating service analysis on {}:{}", target_ip, port);
+    trace!("Initiating service analysis on {}:{}", target_ip, port);
     
-    // Attempt to connect with operational security considerations
+    // Use a shorter initial connection timeout (1.5 seconds instead of 3)
     let conn_result = timeout(
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_millis(1500),
         TcpStream::connect(&addr)
     ).await;
     
@@ -31,7 +30,8 @@ pub async fn grab_banner(target_ip: IpAddr, port: u16) -> Result<String> {
                     // These protocols typically send a banner immediately
                     // Just read initial data without sending anything
                     let mut buffer = vec![0; 2048];
-                    let timeout_duration = std::time::Duration::from_secs(2);
+                    // Reduced timeout from 2 seconds to 1 second
+                    let timeout_duration = std::time::Duration::from_millis(1000);
                     
                     match timeout(timeout_duration, stream.read(&mut buffer)).await {
                         Ok(Ok(n)) if n > 0 => {
@@ -50,25 +50,31 @@ pub async fn grab_banner(target_ip: IpAddr, port: u16) -> Result<String> {
                         if target_ip.is_ipv4() { target_ip.to_string() } else { format!("[{}]", target_ip) }
                     );
                     
-                    // Send the request
-                    if stream.write_all(request.as_bytes()).await.is_ok() {
-                        // Read the response
-                        let mut buffer = vec![0; 4096];
-                        let timeout_duration = std::time::Duration::from_secs(3);
-                        
-                        match timeout(timeout_duration, stream.read(&mut buffer)).await {
-                            Ok(Ok(n)) if n > 0 => {
-                                String::from_utf8_lossy(&buffer[0..n]).to_string()
-                            },
-                            _ => "".to_string()
-                        }
-                    } else {
-                        "".to_string()
+                    // Send the request with timeout
+                    match timeout(
+                        std::time::Duration::from_millis(1000),
+                        stream.write_all(request.as_bytes())
+                    ).await {
+                        Ok(Ok(_)) => {
+                            // Read the response
+                            let mut buffer = vec![0; 4096];
+                            // Reduced timeout from 3 seconds to 1.5 seconds
+                            let timeout_duration = std::time::Duration::from_millis(1500);
+                            
+                            match timeout(timeout_duration, stream.read(&mut buffer)).await {
+                                Ok(Ok(n)) if n > 0 => {
+                                    String::from_utf8_lossy(&buffer[0..n]).to_string()
+                                },
+                                _ => "".to_string()
+                            }
+                        },
+                        _ => "".to_string()
                     }
                 },
                 22 => {
                     // SSH - just read the banner, no need to send anything
                     let mut buffer = vec![0; 256];
+                    // Keep SSH timeout at 1 second
                     let timeout_duration = std::time::Duration::from_secs(1);
                     
                     match timeout(timeout_duration, stream.read(&mut buffer)).await {
@@ -79,56 +85,22 @@ pub async fn grab_banner(target_ip: IpAddr, port: u16) -> Result<String> {
                     }
                 },
                 _ => {
-                    // Generic approach - try both passive and active grabbing
+                    // Generic approach - try passive grabbing only without active probing
+                    // which was causing hanging issues in some cases
                     
                     // First try passive grabbing (just read)
                     let mut buffer = vec![0; 1024];
-                    let timeout_duration = std::time::Duration::from_millis(800);
+                    // Reduced timeout from 800ms to 500ms
+                    let timeout_duration = std::time::Duration::from_millis(500);
                     
-                    let passive_result = match timeout(timeout_duration, stream.read(&mut buffer)).await {
+                    match timeout(timeout_duration, stream.read(&mut buffer)).await {
                         Ok(Ok(n)) if n > 0 => {
-                            Some(String::from_utf8_lossy(&buffer[0..n]).to_string())
+                            String::from_utf8_lossy(&buffer[0..n]).to_string()
                         },
-                        _ => None
-                    };
-                    
-                    if let Some(banner) = passive_result {
-                        if !banner.is_empty() {
-                            return Ok(banner);
-                        }
+                        _ => "".to_string()
                     }
                     
-                    // If passive failed, try active grabbing (send something)
-                    // For operational security, use a low-risk probe
-                    let probes = [
-                        "\r\n\r\n",                  // Simple newlines
-                        "HELP\r\n",                  // Generic help command
-                        "\x00\x00\x00\x00\x00\r\n",  // Null bytes + newline
-                    ];
-                    
-                    for probe in probes {
-                        // Try to reconnect for each probe
-                        if let Ok(Ok(mut new_stream)) = timeout(
-                            std::time::Duration::from_secs(2),
-                            TcpStream::connect(&addr)
-                        ).await {
-                            // Send probe
-                            if new_stream.write_all(probe.as_bytes()).await.is_ok() {
-                                // Read response
-                                let mut buffer = vec![0; 1024];
-                                let timeout_duration = std::time::Duration::from_secs(1);
-                                
-                                if let Ok(Ok(n)) = timeout(timeout_duration, new_stream.read(&mut buffer)).await {
-                                    if n > 0 {
-                                        return Ok(String::from_utf8_lossy(&buffer[0..n]).to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    // If all strategies failed, return empty string
-                    "".to_string()
+                    // We removed the active grabbing code that was causing hangs
                 }
             };
             
@@ -221,4 +193,51 @@ pub fn identify_service_from_banner(banner: &str, port: u16) -> Option<String> {
     };
     
     port_service.map(|s| s.to_string())
+}
+
+/// Display the scanner's banner on program start
+///
+/// This function returns a string containing the ASCII art banner for the scanner.
+/// If colors are enabled, ANSI color codes are included.
+///
+/// # Arguments
+/// * `use_colors` - Whether to include ANSI color codes in the output
+///
+/// # Returns
+/// * `String` - The formatted banner text
+pub fn display_banner(use_colors: bool) -> String {
+    if use_colors {
+        let blue = "\x1b[0;34m";
+        let green = "\x1b[0;32m";
+        let yellow = "\x1b[1;33m";
+        let reset = "\x1b[0m";
+        
+        format!(
+            "{blue}=========================================================={reset}\n\
+            {green}  ██████  ██    ██  █████  ███    ██ ████████ ██    ██ ███    ███{reset}\n\
+            {green} ██    ██ ██    ██ ██   ██ ████   ██    ██    ██    ██ ████  ████{reset}\n\
+            {green} ██    ██ ██    ██ ███████ ██ ██  ██    ██    ██    ██ ██ ████ ██{reset}\n\
+            {green} ██ ▄▄ ██ ██    ██ ██   ██ ██  ██ ██    ██    ██    ██ ██  ██  ██{reset}\n\
+            {green}  ██████   ██████  ██   ██ ██   ████    ██     ██████  ██      ██{reset}\n\
+            {green}     ▀▀                                                          {reset}\n\
+            {blue}  SCANNER | RS Edition | Red Team Network Intelligence Tool{reset}\n\
+            {blue}=========================================================={reset}\n\
+            {yellow}  [!] OpSec-Enhanced Port Scanner and Service Identifier{reset}\n\
+            {blue}=========================================================={reset}\n"
+        )
+    } else {
+        String::from(
+            "==========================================================\n\
+              ██████  ██    ██  █████  ███    ██ ████████ ██    ██ ███    ███\n\
+             ██    ██ ██    ██ ██   ██ ████   ██    ██    ██    ██ ████  ████\n\
+             ██    ██ ██    ██ ███████ ██ ██  ██    ██    ██    ██ ██ ████ ██\n\
+             ██ ▄▄ ██ ██    ██ ██   ██ ██  ██ ██    ██    ██    ██ ██  ██  ██\n\
+              ██████   ██████  ██   ██ ██   ████    ██     ██████  ██      ██\n\
+                 ▀▀                                                          \n\
+              SCANNER | RS Edition | Red Team Network Intelligence Tool\n\
+            ==========================================================\n\
+              [!] OpSec-Enhanced Port Scanner and Service Identifier\n\
+            ==========================================================\n"
+        )
+    }
 } 

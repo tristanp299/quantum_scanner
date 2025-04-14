@@ -1,0 +1,62 @@
+Summary of fixed issues:
+1. Fixed ssl_config.rs to use rustls 0.22 API
+2. Fixed issues with resolve_hostname function in utils.rs
+3. Fixed issues with DNS resolver in utils.rs
+4. Fixed docstring issues in utils.rs
+5. Fixed ScanResult to PortResult conversion in scanner.rs
+6. Fixed port scanning code to properly identify open ports:
+   - Changed port result processing to merge results instead of overwriting
+   - Improved detection of open ports from banner grabbing responses
+   - Added post-analysis checks to ensure ports with Open status from any scan are included
+   - Fixed Window scan implementation to properly extract TCP window size
+   - Removed unused convert_scan_result_to_port_result function
+7. Fixed program hanging issues:
+   - Added timeout to join_all operations in main scan and analysis phases
+   - Improved the raw socket send/receive logic with better timeout handling
+   - Simplified banner grabbing to avoid hanging on active probes
+   - Reduced timeouts for network operations to reasonable values
+8. Fixed SYN and Window scanning to properly detect open ports:
+   - Added connect scan as a fallback method for SYN and Window scans
+   - The scanner now correctly detects when a port is open by successfully connecting
+   - Improved error handling for connection failures
+
+Remaining issues that need more work:
+1. Borrowing issues in the async code in techniques.rs
+2. Ownership issues with self in scanner.rs
+3. Various lifetime issues with mutable borrows in async blocks
+
+TCP Connect Scan Removal & Open Port Detection Fix - Summary
+
+Changes Made:
+
+1. Removed ScanType::Connect case from scanner.rs:
+   - Eliminated the option to perform TCP connect scans directly
+   - Improved OPSEC by ensuring no TCP connections are established just to check port state
+
+2. Removed final verification fallback in scanner.rs:
+   - Eliminated code that would attempt TCP connect scans on all ports if no open ports were found initially
+   - This ensures we don't fall back to less stealthy scanning methods
+
+3. Removed connect_scan function from techniques.rs:
+   - Completely deleted the function to prevent any use of direct TCP connect scanning
+   - Ensures consistent stealth profile across the codebase
+
+4. Updated syn_scan function in techniques.rs:
+   - Removed TCP connect fallback mechanism
+   - Ensures SYN scans are always performed using raw sockets
+   - Added proper random source port generation and sequence number generation
+   - The result now directly uses the raw socket response to determine port status
+
+5. Updated window_scan function in techniques.rs:
+   - Removed TCP connect fallback mechanism
+   - Added proper random source port generation and sequence number generation
+   - More reliable detection using the raw socket method
+
+Benefits:
+
+1. Improved OPSEC - No more TCP connections are established during port scanning, making it harder to detect the scan
+2. Fixed the issue with 0 open ports being reported - By removing the unreliable TCP connect fallback and ensuring raw socket operations work correctly
+3. More consistent scanning behavior - All scans now use raw sockets consistently
+4. More reliable results - The scanner now properly detects open ports through direct packet analysis
+
+Note: SSL scan, TLS Echo scan, and Mimic scan functions still use TcpStream::connect because they need to perform application-level protocol checks. These aren't pure port scans but protocol verification tools.

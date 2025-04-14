@@ -1,17 +1,141 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr/*, SocketAddr*/};
 use std::time::{Duration, Instant};
-use std::env;
 use chrono::{Utc};
+// use std::fs::{/*File,*/ OpenOptions};
+// use std::io::{/*Read,*/ Write, Seek, SeekFrom};
+// use std::path::PathBuf;
 
-use log::{debug, warn, trace};
-use pnet::datalink;
+use log::{debug, warn, info};
+// use pnet::datalink;
 use rand::{Rng, thread_rng, distributions::{Distribution, Uniform}};
 use rand::seq::SliceRandom;
 use regex;
-use hickory_resolver;
 
-/// Get the default interface's IPv4 address
-/// 
+// Network packet imports for ICMP
+use pnet::transport::{transport_channel, TransportChannelType, TransportProtocol};
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::icmp::{IcmpTypes, IcmpCode, MutableIcmpPacket};
+use pnet::packet::icmpv6::{Icmpv6Types, Icmpv6Code, MutableIcmpv6Packet};
+use pnet::packet::Packet;
+
+use anyhow::{Result, anyhow};
+
+/// Finds a suitable non-loopback IPv4 address for the default interface.
+///
+/// This is crucial for raw socket scans which require a specific source IP.
+/// It prioritizes non-loopback, non-link-local, non-multicast IPv4 addresses.
+///
+/// # Returns
+/// * `Result<Ipv4Addr, anyhow::Error>` - The preferred IPv4 address or an error if none found.
+///
+/// # Opsec Considerations
+/// - Binding to the correct source IP is important for scans to work and potentially
+///   for evasion (appearing to originate from the expected interface).
+pub fn find_local_ipv4() -> Result<Ipv4Addr> {
+    // Get all network interfaces
+    let interfaces = pnet_datalink::interfaces();
+
+    // Find the first suitable non-loopback IPv4 address
+    for interface in &interfaces {
+        // Skip loopback, down, or non-running interfaces
+        if interface.is_loopback() || !interface.is_up() || !interface.is_running() {
+            continue;
+        }
+
+        for ip_network in &interface.ips {
+            if let IpAddr::V4(ipv4) = ip_network.ip() {
+                // Check if it's a usable address (not loopback, link-local, multicast, etc.)
+                if !ipv4.is_loopback() && !ipv4.is_link_local() && !ipv4.is_multicast() && !ipv4.is_documentation() && !ipv4.is_unspecified() {
+                    debug!("Found suitable local IPv4 address: {} on interface {}", ipv4, interface.name);
+                    return Ok(ipv4);
+                }
+            }
+        }
+    }
+
+    // If no suitable interface found after checking all, return an error.
+    warn!("No suitable non-loopback local IPv4 address found.");
+    Err(anyhow!("Could not automatically determine a suitable local IPv4 address for raw socket operations."))
+}
+
+/// Finds a suitable non-loopback, non-link-local IPv6 address for the default interface.
+///
+/// This is crucial for raw socket scans which require a specific source IP.
+/// It prioritizes global unicast IPv6 addresses.
+///
+/// # Returns
+/// * `Result<Ipv6Addr, anyhow::Error>` - The preferred IPv6 address or an error if none found.
+///
+/// # Opsec Considerations
+/// - Binding to the correct source IP is important for scans to work and potentially
+///   for evasion (appearing to originate from the expected interface).
+/// - Using temporary or privacy addresses might be preferred for stealth, but this
+///   function currently prioritizes stable global unicast addresses for simplicity.
+pub fn find_local_ipv6() -> Result<Ipv6Addr> {
+    // Get all network interfaces
+    let interfaces = pnet_datalink::interfaces();
+
+    // Find the first suitable non-loopback IPv6 address
+    for interface in &interfaces {
+        // Skip loopback, down, or non-running interfaces
+        if interface.is_loopback() || !interface.is_up() || !interface.is_running() {
+            continue;
+        }
+
+        for ip_network in &interface.ips {
+            if let IpAddr::V6(ipv6) = ip_network.ip() {
+                // Check if it's a usable global unicast address
+                // (not loopback, link-local, unique local, unspecified, multicast, documentation)
+                if !ipv6.is_loopback()
+                    && !ipv6.is_unspecified()
+                    && !ipv6.is_multicast()
+                    && !is_link_local_ipv6(&ipv6) // Check manually as pnet IpNetwork might not expose it easily
+                    && !is_unique_local_ipv6(&ipv6)
+                    && !is_documentation_ipv6(&ipv6)
+                    && is_global_unicast_ipv6(&ipv6) // Prefer global addresses
+                {
+                    debug!("Found suitable local IPv6 address: {} on interface {}", ipv6, interface.name);
+                    return Ok(ipv6);
+                }
+            }
+        }
+    }
+
+    // If no suitable interface found after checking all, return an error.
+    warn!("No suitable non-loopback global unicast local IPv6 address found.");
+    Err(anyhow!("Could not automatically determine a suitable local IPv6 address for raw socket operations."))
+}
+
+// Helper functions for IPv6 address classification (std::net::Ipv6Addr doesn't have all helpers)
+
+/// Check if an IPv6 address is link-local (fe80::/10).
+fn is_link_local_ipv6(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Check if an IPv6 address is unique local (fc00::/7).
+fn is_unique_local_ipv6(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// Check if an IPv6 address is documentation (2001:db8::/32).
+fn is_documentation_ipv6(ip: &Ipv6Addr) -> bool {
+    ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8
+}
+
+/// Check if an IPv6 address is global unicast.
+/// This is a simplified check: not loopback, multicast, link-local, unique-local, unspecified, documentation.
+fn is_global_unicast_ipv6(ip: &Ipv6Addr) -> bool {
+    !ip.is_loopback()
+        && !ip.is_multicast()
+        && !ip.is_unspecified()
+        && !is_link_local_ipv6(ip)
+        && !is_unique_local_ipv6(ip)
+        && !is_documentation_ipv6(ip)
+}
+
+/// Get the default interface's IPv4 address (Kept for reference, use find_local_ipv4 for raw sockets)
+///
 /// This function attempts to find a suitable IPv4 address for the default network interface.
 /// It prioritizes non-loopback interfaces with global addresses.
 ///
@@ -19,7 +143,7 @@ use hickory_resolver;
 /// * `Option<IpAddr>` - The IPv4 address if found, otherwise None
 pub fn get_default_interface_ipv4() -> Option<IpAddr> {
     // Get all network interfaces
-    let interfaces = datalink::interfaces();
+    let interfaces = pnet_datalink::interfaces();
     
     // First, try to find a non-loopback interface with an IPv4 address
     for interface in &interfaces {
@@ -41,7 +165,7 @@ pub fn get_default_interface_ipv4() -> Option<IpAddr> {
     
     // If no suitable interface found, try to use a dummy address
     // This is better than nothing for many scan operations
-    warn!("No suitable IPv4 interface found, using fallback");
+    warn!("No suitable IPv4 interface found, using fallback 127.0.0.1 (Warning: May not work for all scans)");
     Some(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)))
 }
 
@@ -54,7 +178,7 @@ pub fn get_default_interface_ipv4() -> Option<IpAddr> {
 /// * `Option<IpAddr>` - The IPv6 address if found, otherwise None
 pub fn get_default_interface_ipv6() -> Option<IpAddr> {
     // Get all network interfaces
-    let interfaces = datalink::interfaces();
+    let interfaces = pnet_datalink::interfaces();
     
     // First, try to find a non-loopback interface with an IPv6 address
     for interface in &interfaces {
@@ -75,7 +199,8 @@ pub fn get_default_interface_ipv6() -> Option<IpAddr> {
     }
     
     // If no suitable interface found, try to use a dummy address
-    warn!("No suitable IPv6 interface found, using fallback");
+    // WARNING: This fallback is NOT suitable for raw socket source IP binding.
+    warn!("No suitable IPv6 interface found, using fallback ::1 (Warning: May not work for all scans)");
     Some(IpAddr::V6(Ipv6Addr::LOCALHOST))
 }
 
@@ -168,200 +293,7 @@ pub fn backoff_delay(retry: usize, base_ms: u64, max_ms: u64) -> Duration {
     Duration::from_millis(delay_ms)
 }
 
-/// Validate if an IP address is within allowed ranges
-///
-/// Used to prevent scanning restricted or reserved networks.
-///
-/// # Arguments
-/// * `ip` - The IP address to check
-///
-/// # Returns
-/// * `bool` - True if the IP is allowed to be scanned
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-#[allow(dead_code)]
-/// is deterministic based on length. This can help identify
-/// our packets if needed, while still being difficult to detect
-/// as a scanner.
-///
-/// # Arguments
-/// * `length` - The length of payload to generate
-///
-/// # Returns
-/// * `Vec<u8>` - The generated payload
-#[allow(dead_code)]
-pub fn create_payload_pattern(length: usize) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(length);
-    let mut value: u8 = 42; // Start with a seed value
-    
-    for i in 0..length {
-        // Simple PRNG-like algorithm
-        value = value.wrapping_mul(13).wrapping_add(i as u8);
-        payload.push(value);
-    }
-    
-    payload
-}
-
-/// Sanitize output for display or logging
-///
-/// Converts control characters and non-ASCII characters to a safe representation
-///
-/// # Arguments
-/// * `input` - The string to sanitize
-///
-/// # Returns
-/// * `String` - The sanitized string
-pub fn sanitize_string(input: &str) -> String {
-    input.chars()
-        .map(|c| {
-            if c.is_ascii_control() {
-                match c {
-                    '\n' => "\\n".to_string(),
-                    '\r' => "\\r".to_string(),
-                    '\t' => "\\t".to_string(),
-                    _ => format!("\\x{:02x}", c as u8),
-                }
-            } else if !c.is_ascii() {
-                format!("\\u{:04x}", c as u32)
-            } else {
-                c.to_string()
-            }
-        })
-        .collect()
-}
-
-/// Measure execution time of a task
-///
-/// # Arguments
-/// * `task_name` - Name of the task for logging
-/// * `f` - Function to execute and measure
-///
-/// # Returns
-/// * `T` - The return value of the function
-#[allow(dead_code)]
-pub fn measure_time<F, T>(task_name: &str, f: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    let start = Instant::now();
-    let result = f();
-    let duration = start.elapsed();
-    
-    debug!("{} completed in {:?}", task_name, duration);
-    
-    result
-}
-
-/// Measure execution time of an async task
-///
-/// # Arguments
-/// * `task_name` - Name of the task for logging
-/// * `f` - Async function to execute and measure
-///
-/// # Returns
-/// * `T` - The return value of the function
-#[allow(dead_code)]
-pub async fn measure_time_async<F, T, E>(task_name: &str, f: F) -> Result<T, E>
-where
-    F: std::future::Future<Output = Result<T, E>>,
-{
-    let start = Instant::now();
-    let result = f.await;
-    let duration = start.elapsed();
-    
-    debug!("{} completed in {:?}", task_name, duration);
-    
-    result
-}
-
-/// Generate a spoofed source IP address for evading detection
-///
-/// WARNING: Using spoofed IPs can be illegal and/or prevented by ISPs.
-/// This function is intended for authorized red team engagements only.
-///
-/// # Arguments
-/// * `network_class` - Optional class of IP to mimic (e.g., "router", "client", "server")
-///
-/// # Returns
-/// * `IpAddr` - A spoofed IP address that follows requested pattern
-#[allow(dead_code)]
-pub fn get_spoofed_source_ip(network_class: Option<&str>) -> IpAddr {
-    let mut rng = thread_rng();
-    
-    match network_class {
-        Some("router") => {
-            // Common router-like addresses (e.g., x.x.x.1, x.x.x.254)
-            let first = rng.gen_range(1..223);
-            let second = rng.gen_range(0..255);
-            let third = rng.gen_range(0..255);
-            let last = if rng.gen_bool(0.7) { 1 } else { 254 };
-            
-            IpAddr::V4(Ipv4Addr::new(first, second, third, last))
-        },
-        Some("client") => {
-            // Addresses that look like typical client machines
-            let first = match rng.gen_range(0..3) {
-                0 => 10,                           // RFC1918 private (10.0.0.0/8)
-                1 => 192,                          // RFC1918 private (192.168.0.0/16)
-                _ => rng.gen_range(1..223),        // Random public
-            };
-            
-            let second = if first == 192 { 168 } else { rng.gen_range(0..255) };
-            let third = rng.gen_range(0..255);
-            let last = rng.gen_range(2..254);      // Avoid .0, .1, and .255
-            
-            IpAddr::V4(Ipv4Addr::new(first, second, third, last))
-        },
-        Some("server") => {
-            // Addresses that look like typical servers
-            // Often use IPs that appear statically assigned
-            let first = rng.gen_range(1..223);
-            let second = rng.gen_range(0..255);
-            let third = rng.gen_range(0..255);
-            let last = match rng.gen_range(0..3) {
-                0 => rng.gen_range(10..20),        // Common server range
-                1 => rng.gen_range(100..110),      // Common server range
-                _ => rng.gen_range(50..60),        // Common server range
-            };
-            
-            IpAddr::V4(Ipv4Addr::new(first, second, third, last))
-        },
-        _ => {
-            // Completely random IP, but avoid reserved ranges
-            loop {
-                let first = rng.gen_range(1..223); // Avoid 0 and 224-255
-                
-                // Skip obvious reserved ranges
-                if first == 10 || first == 127 || first == 169 || first == 172 || first == 192 {
-                    continue;
-                }
-                
-                let second = rng.gen_range(0..255);
-                
-                // Skip more reserved ranges
-                if (first == 172 && second >= 16 && second <= 31) || 
-                   (first == 192 && second == 168) {
-                    continue;
-                }
-                
-                let third = rng.gen_range(0..255);
-                let fourth = rng.gen_range(1..255); // Avoid .0 and .255
-                
-                let ip = Ipv4Addr::new(first, second, third, fourth);
-                
-                // Final check to avoid reserved networks
-                if !ip.is_private() && !ip.is_loopback() && !ip.is_multicast() && 
-                   !ip.is_broadcast() && !ip.is_documentation() {
-                    return IpAddr::V4(ip);
-                }
-            }
-        }
-    }
-}
-
-/// Get a realistic User-Agent string for mimicking browser traffic
+/// Generate a random User-Agent string for mimicking browser traffic
 ///
 /// Used when performing application-level scans to blend in with
 /// normal HTTP traffic patterns and avoid obvious scanner signatures.
@@ -376,42 +308,50 @@ pub fn get_random_user_agent(browser_type: Option<&str>) -> String {
     let mut rng = thread_rng();
     
     // Common modern browser User-Agents
-    let chrome_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
+    let all_agents = [
+        // Chrome agents
+        ("chrome", [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
+        ]),
+        // Firefox agents
+        ("firefox", [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:88.0) Gecko/20100101 Firefox/88.0",
+            "Mozilla/5.0 (X11; Linux i686; rv:90.0) Gecko/20100101 Firefox/90.0"
+        ]),
+        // Safari agents
+        ("safari", [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
+            "Mozilla/5.0 (iPad; CPU OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1"
+        ]),
+        // Edge agents
+        ("edge", [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.59",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36 Edg/92.0.902.55",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36 Edg/92.0.902.55"
+        ])
     ];
     
-    let firefox_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:88.0) Gecko/20100101 Firefox/88.0",
-        "Mozilla/5.0 (X11; Linux i686; rv:90.0) Gecko/20100101 Firefox/90.0"
-    ];
-    
-    let safari_agents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
-    ];
-    
-    let edge_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.59"
-    ];
-    
+    // Select browser based on requested type or random
     match browser_type {
-        Some("chrome") => chrome_agents[rng.gen_range(0..chrome_agents.len())].to_string(),
-        Some("firefox") => firefox_agents[rng.gen_range(0..firefox_agents.len())].to_string(),
-        Some("safari") => safari_agents[rng.gen_range(0..safari_agents.len())].to_string(),
-        Some("edge") => edge_agents[rng.gen_range(0..edge_agents.len())].to_string(),
-        _ => {
-            // Choose a random browser type if none specified
-            let all_agents = [
-                &chrome_agents[..],
-                &firefox_agents[..],
-                &safari_agents[..],
-                &edge_agents[..],
-            ].concat();
-            
-            all_agents[rng.gen_range(0..all_agents.len())].to_string()
+        Some(browser) => {
+            // Find the matching browser group
+            for (browser_name, agents) in all_agents.iter() {
+                if browser.to_lowercase() == *browser_name {
+                    return agents[rng.gen_range(0..agents.len())].to_string();
+                }
+            }
+            // Fallback to random if browser type not found
+            let (_, agents) = all_agents.choose(&mut rng).unwrap();
+            agents[rng.gen_range(0..agents.len())].to_string()
+        },
+        None => {
+            // Select a random browser type
+            let (_, agents) = all_agents.choose(&mut rng).unwrap();
+            agents[rng.gen_range(0..agents.len())].to_string()
         }
     }
 }
@@ -1604,177 +1544,448 @@ pub fn check_ssl_vulnerabilities(cert_info: &crate::models::CertificateInfo) -> 
     vulns
 }
 
-/// Create a DNS resolver using system DNS settings
-pub fn create_system_dns_resolver() -> anyhow::Result<hickory_resolver::TokioAsyncResolver> {
-    use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-    
-    // Create resolver with default system config
-    hickory_resolver::TokioAsyncResolver::tokio_from_system_conf()
-        .map_err(|e| anyhow::anyhow!("Failed to create DNS resolver: {}", e))
-}
-
 /// Create a DNS resolver with a custom DNS server
-pub fn create_custom_dns_resolver(dns_server: IpAddr) -> anyhow::Result<hickory_resolver::TokioAsyncResolver> {
-    use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
-    
-    // Create a config with the custom DNS server
-    let mut config = ResolverConfig::new();
-    
-    // Create a nameserver with the specified IP
-    let name_server = NameServerConfig {
-        socket_addr: std::net::SocketAddr::new(dns_server, 53),
-        protocol: Protocol::Udp,
-        tls_dns_name: None,
-        trust_negative_responses: true,
-        bind_addr: None,
-        tls_config: None,
-    };
-    
-    // Add the nameserver to the configuration
-    config.add_name_server(name_server);
-    
-    // Create default options
-    let opts = ResolverOpts::default();
-    
-    // According to the documentation, TokioAsyncResolver::tokio returns the resolver directly,
-    // not wrapped in a Result. If there's an error, we might only get it when using the resolver.
-    let resolver = hickory_resolver::TokioAsyncResolver::tokio(config, opts);
-    
-    // Return the resolver wrapped in Ok
-    Ok(resolver)
-}
+///
+/// - DNS requests can be monitored at the specified server
+/// - Choose trustworthy DNS server for sensitive operations
 
-/// Send an ICMP packet with the specified payload and TTL
-/// 
-/// This is a placeholder implementation for a function that would normally send
-/// a raw ICMP packet using libpcap or similar. For operational security,
-/// this version uses a basic approach that would need to be expanded in
-/// a real implementation.
-pub async fn send_icmp_packet(target_ip: std::net::IpAddr, payload: &[u8], ttl: u8) -> anyhow::Result<bool> {
-    use log::debug;
-    
-    // Validate payload size to ensure it's reasonable for an ICMP packet
-    if payload.len() < 8 || payload.len() > 1472 {  // Minimum size + Max payload that fits in standard MTU
-        return Err(anyhow::anyhow!("Invalid ICMP payload size: {}", payload.len()));
+/// Configure the system to route traffic through Tor
+///
+/// # OPSEC considerations:
+/// - Using Tor can provide anonymity but may slow down scanning
+/// - Some organizations monitor/block Tor exit nodes
+/// - Not all scanning techniques work effectively through Tor
+///
+/// # Arguments
+/// * `use_tor` - Whether to enable or disable Tor routing
+///
+/// # Returns
+/// * `bool` - True if Tor routing was successfully enabled
+pub fn configure_tor_routing(enable: bool) -> bool {
+    if !enable {
+        return true; // Nothing to do if not enabling
     }
     
-    // Log the action with operational security in mind
-    debug!("Sending indirect probe with custom payload ({} bytes) to {} with TTL {}", 
-           payload.len(), target_ip, ttl);
+    // Check if Tor is installed and running
+    let tor_running = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg("systemctl status tor 2>/dev/null || pgrep -x tor 2>/dev/null || pgrep -x tor.real 2>/dev/null")
+        .output() {
+            Ok(output) => output.status.success(),
+            Err(_) => false
+        };
     
-    // In a real implementation, this would:
-    // 1. Create a raw socket
-    // 2. Craft an ICMP echo request with the specified payload and TTL
-    // 3. Set the TTL value on the IP header
-    // 4. Calculate ICMP checksum including the payload
-    // 5. Send the packet to the target
-    // 6. Return success/failure
-    
-    // For this implementation, we'll simulate the process of sending with the
-    // specified TTL - lower TTLs have a higher chance of "failure" to simulate
-    // packets being dropped in transit
-    let ttl_factor = 1.0 - (255.0 - ttl as f64) / 512.0;  // TTL scaling factor
-    let payload_factor = if payload.len() > 256 { 0.95 } else { 1.0 };  // Small penalty for larger payloads
-    
-    // Calculate success probability based on TTL and payload size
-    let success_probability = ttl_factor * payload_factor * 0.95;  // Base 95% success rate
-    
-    // Simulate network delay based on TTL (higher TTL = potentially longer paths)
-    let delay_ms = rand::thread_rng().gen_range(5..20) + (255 - ttl) as u64 / 10;
-    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-    
-    // Determine if the send was successful
-    let success = rand::random::<f64>() < success_probability;
-    
-    if success {
-        Ok(true)
-    } else {
-        Err(anyhow::anyhow!("Failed to send ICMP packet (simulated network issue)"))
+    if !tor_running {
+        warn!("Tor service is not running. Cannot route traffic through Tor.");
+        return false;
     }
-}
-
-/// Receive and validate an ICMP response
-/// 
-/// This is a placeholder implementation for an ICMP packet receiver that
-/// would normally use raw sockets to listen for and parse ICMP responses.
-pub async fn receive_icmp_packet(source_ip: std::net::IpAddr, validation_key: u16) -> anyhow::Result<bool> {
-    use log::debug;
     
-    // Log the action with operational security in mind
-    debug!("Waiting for indirect response from {} with validation key {:#06x}", 
-           source_ip, validation_key);
+    // Check for various Tor libraries
+    let lib_paths = [
+        "libtorsocks.so",
+        "/usr/lib/libtorsocks.so",
+        "/usr/lib/x86_64-linux-gnu/libtorsocks.so",
+        "/usr/lib/torsocks/libtorsocks.so",
+        "libtsocks.so",
+        "/usr/lib/libtsocks.so"
+    ];
     
-    // In a real implementation, this would:
-    // 1. Create a raw socket listener
-    // 2. Filter for ICMP echo replies from the target IP
-    // 3. Parse the payload and validate it contains our validation key
-    // 4. Return true if valid, false if invalid
+    // Find first available Tor library
+    let tor_lib = lib_paths.iter().find(|&path| {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("ldconfig -p | grep -q {}", path))
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false) || std::path::Path::new(path).exists()
+    });
     
-    // Add a realistic delay to simulate network latency
-    let delay_ms = rand::thread_rng().gen_range(30..100);
-    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-    
-    // Use the validation_key to influence the response behavior
-    // This simulates the key being included in the response and validated
-    let key_factor = (validation_key % 100) as f64 / 100.0;
-    
-    // Simulate different response scenarios with more realistic probabilities
-    // adjusted by the validation key to create deterministic behavior
-    let response_type = {
-        let base = rand::thread_rng().gen_range(0..10) as f64;
-        let adjusted = (base + key_factor * 3.0) as usize % 10;
-        adjusted
+    let lib_path = match tor_lib {
+        Some(path) => path,
+        None => {
+            warn!("Could not find Tor libraries. Make sure torsocks/tsocks is installed.");
+            return false;
+        }
     };
     
-    match response_type {
-        0..=5 => {
-            // Simulate valid response - the key was found in the response
-            debug!("Received valid ICMP response with matching key {:#06x}", validation_key);
-            Ok(true)
+    // Set environment variables for Tor routing
+    // Note: std::env::set_var returns () not Result, so we can't check for errors
+    std::env::set_var("LD_PRELOAD", lib_path);
+    
+    // Check SOCKS port for Tor
+    let tor_port = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg("grep -o 'SOCKSPort [0-9]\\+' /etc/tor/torrc 2>/dev/null | awk '{print $2}'")
+        .output() {
+            Ok(output) => {
+                if output.status.success() && !output.stdout.is_empty() {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                } else {
+                    "9050".to_string() // Default Tor SOCKS port
+                }
+            },
+            Err(_) => "9050".to_string()
+        };
+    
+    // Set Tor SOCKS proxy port
+    // Note: std::env::set_var returns () not Result, so we can't check for errors
+    std::env::set_var("TORSOCKS_PORT", &tor_port);
+    
+    info!("Tor routing configured successfully using port {} with library {}", tor_port, lib_path);
+    true
+}
+
+/// Generate DNS tunnel session identifier
+///
+/// Creates a unique but not obviously random session ID for DNS tunneling
+/// to avoid standing out in DNS logs.
+///
+/// # OPSEC considerations:
+/// - DNS tunneling can be detected by volume or pattern analysis
+/// - Using patterns that resemble normal DNS traffic helps avoid detection
+///
+/// # Returns
+/// * `String` - DNS tunnel session identifier
+pub fn generate_dns_tunnel_id() -> String {
+    // Generate parts that look like subdomains with common patterns
+    // But are actually encoding random data
+    
+    let alphanumeric_chars: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = thread_rng();
+    
+    // First part: "cdn", "api", "www", "app", etc.
+    let prefixes = ["cdn", "api", "www", "app", "static", "img", "m", "s"];
+    let prefix = prefixes[rng.gen_range(0..prefixes.len())];
+    
+    // Second part: random alphanumeric string of length 4-6
+    // Do this character by character for better readability
+    let mut id_part = String::with_capacity(6);
+    let len = rng.gen_range(4..=6);
+    for _ in 0..len {
+        id_part.push(alphanumeric_chars[rng.gen_range(0..alphanumeric_chars.len())] as char);
+    }
+    
+    // Third part: numeric string like a date, version or cache buster
+    let numeric_part = rng.gen_range(101..999);
+    
+    // Combine them in a way that looks like a normal subdomain
+    format!("{}-{}-{}", prefix, id_part, numeric_part)
+}
+
+/// Resolves a hostname to an IP address using the system DNS resolver
+///
+/// # Arguments
+/// * `hostname` - The hostname to resolve
+///
+/// # Returns
+/// * `Result<IpAddr, anyhow::Error>` - The resolved IP address or an error
+///
+/// # OPSEC Considerations
+/// - DNS queries can sometimes be monitored by defenders
+/// - Using the system resolver is less suspicious than custom DNS configurations
+pub async fn resolve_hostname(hostname: &str) -> Result<IpAddr, anyhow::Error> {
+    // Try to parse as IP address first - no DNS query needed
+    if let Ok(ip) = hostname.parse::<IpAddr>() {
+        return Ok(ip);
+    }
+    
+    // Use tokio's DNS resolver which is simpler than dealing with hickory-resolver API changes
+    match tokio::net::lookup_host(format!("{}:0", hostname)).await {
+        Ok(mut addrs) => {
+            // Try to find an IPv4 address first, then fall back to any address
+            let ip = addrs.find(|addr| addr.ip().is_ipv4())
+                .or_else(|| addrs.next())
+                .map(|addr| addr.ip())
+                .ok_or_else(|| anyhow!("No IP addresses found for hostname: {}", hostname))?;
+            
+            debug!("Resolved hostname {} to {}", hostname, ip);
+            Ok(ip)
         },
-        6..=7 => {
-            // Simulate invalid response - got response but key validation failed
-            debug!("Received ICMP response but validation failed - expected key {:#06x}", validation_key);
-            Ok(false)
-        },
-        _ => {
-            // Simulate error in receiving or parsing
-            Err(anyhow::anyhow!("Failed to receive or parse ICMP response"))
+        Err(e) => {
+            Err(anyhow!("DNS resolution failed for {}: {}", hostname, e))
         }
     }
 }
 
-// Fix MySQL version detection
-pub fn extract_mysql_version(banner: &str) -> Option<String> {
-    if banner.contains("mysql") || banner.contains("MySQL") {
-        // Try to find version in format X.Y.Z
-        let re = regex::Regex::new(r"(\d+\.\d+\.\d+[\w-]*)").ok()?;
-        if let Some(caps) = re.captures(banner) {
-            return Some(format!("MySQL {}", &caps[1]));
-        }
-    }
-    None
-}
-
-// MariaDB version detection
+/// Extract MariaDB version from a server banner
+///
+/// # Arguments
+/// * `banner` - The server banner string
+///
+/// # Returns
+/// * `Option<String>` - The extracted version or None if not found
 pub fn extract_mariadb_version(banner: &str) -> Option<String> {
-    if banner.contains("mariadb") || banner.contains("MariaDB") {
-        // Try to find version in format X.Y.Z
-        let re = regex::Regex::new(r"(\d+\.\d+\.\d+[\w-]*)").ok()?;
-        if let Some(caps) = re.captures(banner) {
-            return Some(format!("MariaDB {}", &caps[1]));
-        }
-    }
-    None
+    // Match patterns like "mariadb-10.5.12"
+    let re = regex::Regex::new(r"mariadb[-\s]+(\d+\.\d+\.\d+[\w\.-]*)").ok()?;
+    re.captures(banner).map(|caps| format!("MariaDB {}", &caps[1]))
 }
 
-// PostgreSQL version detection
+/// Extract PostgreSQL version from a server banner
+///
+/// # Arguments
+/// * `banner` - The server banner string
+///
+/// # Returns
+/// * `Option<String>` - The extracted version or None if not found
 pub fn extract_postgresql_version(banner: &str) -> Option<String> {
-    if banner.contains("PostgreSQL") {
-        let re = regex::Regex::new(r"PostgreSQL\s+(\d+\.\d+[\w.]*)").ok()?;
-        if let Some(caps) = re.captures(banner) {
-            return Some(format!("PostgreSQL {}", &caps[1]));
+    // Match patterns like "PostgreSQL 12.7"
+    let re = regex::Regex::new(r"postgresql\s+(\d+(?:\.\d+)*)").ok()?;
+    re.captures(&banner.to_lowercase()).map(|caps| format!("PostgreSQL {}", &caps[1]))
+}
+
+/// Send an ICMP packet with a custom payload to a target
+/// 
+/// # OPSEC considerations:
+/// - Sending custom ICMP packets may trigger network monitoring systems
+/// - Limit frequency and target selection to reduce detection
+pub fn send_icmp_packet(target_ip: IpAddr, payload: &[u8], ttl: u8) -> Result<bool, anyhow::Error> {
+    // Log the operation
+    debug!("Sending ICMP packet to {} with TTL {} and {} bytes payload", target_ip, ttl, payload.len());
+    
+    // Create a transport channel for sending ICMP packets
+    let protocol = match target_ip {
+        IpAddr::V4(_) => TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
+        IpAddr::V6(_) => TransportChannelType::Layer4(TransportProtocol::Ipv6(IpNextHeaderProtocols::Icmpv6)),
+    };
+    
+    let (mut tx, _) = match transport_channel(4096, protocol) {
+        Ok((tx, rx)) => (tx, rx),
+        Err(e) => return Err(anyhow!("Failed to create transport channel for ICMP: {}", e)),
+    };
+    
+    // If payload is too short, add random padding to make it look like normal ICMP traffic
+    // This is done to avoid suspicion from network monitoring systems
+    let mut extended_payload = payload.to_vec();
+    if extended_payload.len() < 16 {
+        let mut rng = thread_rng();
+        let padding_size = 16 - extended_payload.len();
+        for _ in 0..padding_size {
+            extended_payload.push(rng.gen());
         }
     }
-    None
+    
+    match target_ip {
+        IpAddr::V4(_) => {
+            // Create an ICMP echo request packet (ping)
+            let mut icmp_buffer = vec![0u8; 8 + extended_payload.len()];
+            let mut icmp_packet = MutableIcmpPacket::new(&mut icmp_buffer)
+                .ok_or(anyhow!("Failed to create ICMP packet"))?;
+            
+            // Set ICMP header fields
+            icmp_packet.set_icmp_type(IcmpTypes::EchoRequest);
+            icmp_packet.set_icmp_code(IcmpCode::new(0));
+            
+            // Set a random identifier and sequence for the echo request
+            let ident = random_high_port();
+            let seq = thread_rng().gen::<u16>();
+            
+            // Create a temporary buffer for the full payload
+            let mut full_payload = Vec::with_capacity(4 + extended_payload.len());
+            
+            // Add the identifier and sequence
+            full_payload.extend_from_slice(&ident.to_be_bytes());
+            full_payload.extend_from_slice(&seq.to_be_bytes());
+            
+            // Add the actual payload
+            full_payload.extend_from_slice(&extended_payload);
+            
+            // Set the payload
+            icmp_packet.set_payload(&full_payload);
+            
+            // Calculate the ICMP checksum
+            let checksum = pnet::packet::icmp::checksum(&icmp_packet.to_immutable());
+            icmp_packet.set_checksum(checksum);
+            
+            // Send the ICMP packet
+            match tx.send_to(icmp_packet, target_ip) {
+                Ok(_) => Ok(true),
+                Err(e) => Err(anyhow!("Failed to send ICMP packet: {}", e)),
+            }
+        },
+        IpAddr::V6(_) => {
+            // Create an ICMPv6 echo request packet
+            let mut icmp_buffer = vec![0u8; 8 + extended_payload.len()];
+            let mut icmp_packet = MutableIcmpv6Packet::new(&mut icmp_buffer)
+                .ok_or(anyhow!("Failed to create ICMPv6 packet"))?;
+            
+            // Set ICMPv6 header fields
+            icmp_packet.set_icmpv6_type(Icmpv6Types::EchoRequest);
+            icmp_packet.set_icmpv6_code(Icmpv6Code::new(0));
+            
+            // Set a random identifier and sequence for the echo request
+            let ident = random_high_port();
+            let seq = thread_rng().gen::<u16>();
+            
+            // Create a temporary buffer for the full payload
+            let mut full_payload = Vec::with_capacity(4 + extended_payload.len());
+            
+            // Add the identifier and sequence
+            full_payload.extend_from_slice(&ident.to_be_bytes());
+            full_payload.extend_from_slice(&seq.to_be_bytes());
+            
+            // Add the actual payload
+            full_payload.extend_from_slice(&extended_payload);
+            
+            // Set the payload
+            icmp_packet.set_payload(&full_payload);
+            
+            // ICMPv6 checksum is calculated by the kernel
+            
+            // Send the ICMPv6 packet
+            match tx.send_to(icmp_packet, target_ip) {
+                Ok(_) => Ok(true),
+                Err(e) => Err(anyhow!("Failed to send ICMPv6 packet: {}", e)),
+            }
+        }
+    }
 }
+
+/// Receive and check for ICMP packet responses 
+/// 
+/// # OPSEC considerations:
+/// - Intercepting ICMP packets requires raw socket privileges
+/// - May be detected by host-based security systems
+pub fn receive_icmp_packet(target_ip: IpAddr, expected_key: &[u8]) -> Result<bool, anyhow::Error> {
+    // Log the operation
+    debug!("Waiting for ICMP response from {}", target_ip);
+    
+    // Create a transport channel for receiving ICMP packets
+    let protocol = match target_ip {
+        IpAddr::V4(_) => TransportChannelType::Layer4(TransportProtocol::Ipv4(IpNextHeaderProtocols::Icmp)),
+        IpAddr::V6(_) => TransportChannelType::Layer4(TransportProtocol::Ipv6(IpNextHeaderProtocols::Icmpv6)),
+    };
+    
+    let (_, mut rx) = match transport_channel(4096, protocol) {
+        Ok((tx, rx)) => (tx, rx),
+        Err(e) => return Err(anyhow!("Failed to create transport channel for ICMP receive: {}", e)),
+    };
+    
+    // Create ICMP packet iterator
+    match target_ip {
+        IpAddr::V4(_) => {
+            let mut iter = pnet::transport::icmp_packet_iter(&mut rx);
+            
+            // Try to receive for a limited time
+            // This is a non-blocking receive with a timeout
+            for _ in 0..5 {
+                match iter.next() {
+                    Ok((packet, addr)) => {
+                        // Check if response is from our target
+                        if addr == target_ip {
+                            debug!("Received ICMP response from target {}", addr);
+                            
+                            // Analyze the packet payload to check if it contains our expected key
+                            if packet.get_icmp_type() == IcmpTypes::EchoReply {
+                                let payload = packet.payload();
+                                
+                                // Check payload length - need at least 4 bytes for key
+                                if payload.len() >= expected_key.len() + 4 {
+                                    // The key should be at offset 4 after ident and sequence
+                                    let key_portion = &payload[4..4 + expected_key.len()];
+                                    if key_portion == expected_key {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                            
+                            // If we received a response but didn't match our key exactly
+                            return Ok(false);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Error receiving ICMP packet: {}", e);
+                        // Continue trying to receive
+                    }
+                }
+                
+                // Short delay between receive attempts
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        IpAddr::V6(_) => {
+            let mut iter = pnet::transport::icmpv6_packet_iter(&mut rx);
+            
+            // Try to receive for a limited time
+            for _ in 0..5 {
+                match iter.next() {
+                    Ok((packet, addr)) => {
+                        // Check if response is from our target
+                        if addr == target_ip {
+                            debug!("Received ICMPv6 response from target {}", addr);
+                            
+                            // Analyze the packet payload to check if it contains our expected key
+                            if packet.get_icmpv6_type() == pnet::packet::icmpv6::Icmpv6Types::EchoReply {
+                                let payload = packet.payload();
+                                
+                                // Check payload length - need at least 4 bytes for key
+                                if payload.len() >= expected_key.len() + 4 {
+                                    // The key should be at offset 4 after ident and sequence
+                                    let key_portion = &payload[4..4 + expected_key.len()];
+                                    if key_portion == expected_key {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                            
+                            // If we received a response but didn't match our key exactly
+                            return Ok(false);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Error receiving ICMPv6 packet: {}", e);
+                        // Continue trying to receive
+                    }
+                }
+                
+                // Short delay between receive attempts
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    
+    // If we reach here, no matching response was received
+    debug!("No matching ICMP response received from {}", target_ip);
+    Ok(false)
+}
+
+
+/// Sanitize a string for safe logging and output
+/// 
+/// Removes control characters and other potentially dangerous sequences.
+/// 
+/// # Arguments
+/// * `input` - The string to sanitize
+/// 
+/// # Returns
+/// * `String` - The sanitized string
+/// 
+/// # OPSEC considerations:
+/// - Important for logging user-supplied data
+pub fn sanitize_string(input: &str) -> String {
+    // Remove control characters and other potentially dangerous characters
+    let sanitized = input
+        .chars()
+        .filter(|&c| !c.is_control() && c != '\'' && c != '\"' && c != '\\')
+        .collect::<String>();
+        
+    // Limit length to prevent log flooding
+    if sanitized.len() > 4000 {
+        sanitized[..4000].to_string() + "...(truncated)"
+    } else {
+        sanitized
+    }
+}
+
+/// Extract MySQL version from a server banner
+///
+/// # Arguments
+/// * `banner` - The server banner string
+///
+/// # Returns
+/// * `Option<String>` - The extracted version or None if not found
+pub fn extract_mysql_version(banner: &str) -> Option<String> {
+    // Match patterns like "5.7.35-0ubuntu0.18.04.1"
+    let re = regex::Regex::new(r"(\d+\.\d+\.\d+[\w\.-]*)").ok()?;
+    re.captures(banner).map(|caps| caps[1].to_string())
+}
+

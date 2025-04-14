@@ -305,17 +305,28 @@ Here's a list of all available command options and their descriptions:
     *   **Timing & Stealth:** Use `--random-delay` and consider rate-limiting options (if available) to blend in with normal traffic and avoid triggering IDS/IPS alerts based on scan speed.
     *   **Scan Selection:** Choose scan types (`-s`) appropriate for the target environment. A loud TCP connect scan might be fine in some contexts but disastrous in others. Start with stealthier methods.
 
-3.  **Artifact Management:**
+3.  **Scan Type Selection for OPSEC:**
+    *   **Stealth vs. Information Tradeoff:** More stealthy scan types (SYN, FIN, NULL) provide less information but leave fewer traces, while more informative scan types (SSL, TLS-Echo, Mimic) create more forensic evidence.
+    *   **TCP Connect Concerns:** Scans that use TCP connect functionality (SSL, TLS-Echo, Mimic) create full connections that:
+        * Are logged by most systems (connection logs, firewall logs)
+        * Can be tied directly to your source IP
+        * May trigger alerting thresholds more quickly than half-open scans
+        * Leave state in the target's connection tracking tables
+        * Could be stored in SIEM systems for extended periods
+    *   **Escalation of Scan Types:** Start with the stealthiest scan types and only escalate to more intrusive scans when additional information is absolutely necessary.
+    *   **Contextual Selection:** Some environments will have no logging of any scan types, while others may have full packet captures; adjust scan selection accordingly.
+
+4.  **Artifact Management:**
     *   **Memory-Only:** Prioritize using memory-only mode (`-m`) whenever possible to prevent logs and temporary files from being written to disk.
     *   **Logging:** If logging is absolutely necessary (e.g., for large scans needing later analysis), use `--encrypt-logs` and ensure logs are stored on an encrypted volume.
     *   **Cleanup:** Use `--secure-delete` cautiously for log cleanup. Understand that secure deletion on modern SSDs is complex due to wear-leveling and garbage collection; it's not foolproof. The best approach is to avoid creating the artifact in the first place (use `-m`). After building, use `./build.sh --clean` to remove intermediate build files.
 
-4.  **Binary Handling:**
+5.  **Binary Handling:**
     *   Always use binaries compiled with `--strip`.
     *   Consider `--compress` if size is a concern, but be aware of potential AV flags.
     *   Verify the integrity of your tools before and after transferring them to ensure they haven't been tampered with.
 
-5.  **Situational Awareness:**
+6.  **Situational Awareness:**
     *   Understand the target's potential monitoring capabilities (IDS/IPS, EDR, SIEM).
     *   Correlate scan findings with other reconnaissance data. Don't rely solely on scanner output.
     *   Be prepared to modify or cease scanning activity if detection is suspected.
@@ -337,6 +348,7 @@ Quantum Scanner supports multiple scan techniques, each with different advantage
 - **Advantages:** Provides detailed information about TLS implementation and certificates.
 - **Detection:** Appears as normal SSL/TLS handshake.
 - **Best For:** Identifying encryption services and analyzing certificate details.
+- **⚠️ OPSEC WARNING:** Uses full TCP connections that are logged by target systems. Creates significantly more forensic evidence than SYN scans. Only use when certificate details are essential for your operation.
 
 #### UDP Scan
 - **Description:** Probes UDP ports and analyzes ICMP responses.
@@ -355,12 +367,14 @@ Quantum Scanner supports multiple scan techniques, each with different advantage
 - **Advantages:** Can detect services hidden behind TLS proxies.
 - **Detection:** Appears similar to a failed TLS handshake.
 - **Best For:** Identifying hidden services behind TLS infrastructure.
+- **⚠️ OPSEC WARNING:** Uses full TCP connections that are logged by target systems. Creates more forensic evidence than raw socket scans. Only use when TLS service verification is necessary for your operation.
 
 #### Mimic Scan
 - **Description:** Sends SYN packets with application-specific payloads.
 - **Advantages:** Traffic resembles legitimate application communication.
 - **Detection:** More difficult to detect as scanning activity.
 - **Best For:** Evading pattern-based detection systems.
+- **⚠️ OPSEC WARNING:** Uses full TCP connections and sends application-layer data that may be logged. Creates significantly more forensic evidence than stealthier scan types. Only use when protocol-specific behavior testing is required.
 
 #### Frag Scan
 - **Description:** Fragments scan packets into smaller pieces.
@@ -445,18 +459,46 @@ The Quantum Scanner includes an advanced ML-based service identification system 
 - **Service Fingerprinting:** Analyzes service responses using multiple feature vectors rather than simple string matching.
 - **Version Extraction:** Uses specialized patterns to extract version information from identified services.
 - **Binary Protocol Analysis:** Can identify services using binary (non-text) protocols by analyzing response patterns.
+- **Self-Learning System:** Continuously improves identification accuracy by learning from scan results and user feedback.
+- **Deep Packet Inspection:** Optional nDPI integration provides industry-standard protocol detection for 200+ protocols.
 
 #### Key Features:
 - **Feature Vector Analysis:** Extracts dozens of features from service responses including character distributions, entropy, structural elements, and protocol indicators.
-- **Port-Context Awareness:** Incorporates port information to improve classification accuracy.
+- **Port-Context Awareness:** Incorporates port information to improve classification accuracy using Bayesian prior probabilities.
 - **Temporal Analysis:** Analyzes response timing characteristics which can help identify certain services.
+- **Advanced Binary Protocol Detection:** Uses statistical analysis of byte distributions, header structures, and protocol-specific patterns to identify binary services.
+- **Continuous Learning:** The ML system can learn from each scan, improving its accuracy over time.
+
+#### nDPI Integration:
+When built with the `ndpi` feature, Quantum Scanner leverages the powerful nDPI deep packet inspection library:
+- Detects 200+ application-layer protocols
+- Classifies traffic into meaningful categories (e.g., VPN, Database, Web, etc.)
+- Provides fallback identification for ambiguous protocols
+- Works completely locally - no external connections required
+- Enhanced detection of encrypted and proprietary protocols
 
 #### When to Use:
 - When services don't provide clear identification strings in banners
 - For ambiguous or custom services that don't follow standard protocols
 - When service banners have been deliberately modified to conceal the actual service
+- During operations where accurate service identification is mission-critical
 
-ML-based service identification is enabled by default (`--ml-ident`) and integrates seamlessly with the scanner's other service detection methods.
+ML-based service identification is enabled by default (`--ml-ident`) and integrates seamlessly with the scanner's other service detection methods. For complete protocol detection capabilities, build with the nDPI feature (`cargo build --features ndpi`).
+
+### Building with Enhanced Features
+
+For enhanced protocol detection capabilities, Quantum Scanner offers different feature flags:
+
+```bash
+# Standard build with ML-based service identification
+./build.sh
+
+# Build with nDPI integration for advanced protocol detection
+./build.sh --features ndpi
+
+# Build with all features (ML, nDPI, training CLI)
+./build.sh --features full
+```
 
 ## License
 

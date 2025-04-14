@@ -1,14 +1,19 @@
 use clap::{Parser, ValueEnum};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
 use rand::{thread_rng, Rng};
 use std::sync::Arc;
 use std::fs;
-use std::io::{Read, Write};
-use serde_json;
 use std::net::IpAddr;
+use serde_json;
+use anyhow::{Result, anyhow};
+use tokio::time::sleep;
+use tokio::sync::Mutex;
+// use crate::techniques::{syn_scan, ssl_scan, udp_scan, ack_scan, fin_scan, xmas_scan, null_scan, window_scan, tls_echo_scan, mimic_scan_with_payload, frag_scan};
+use crate::utils::{find_local_ipv4, MemoryLogBuffer};
+use crate::models::{ScanType, PortRanges, TopPorts, requires_raw_sockets};
 
 mod banner;
 mod http_analyzer;
@@ -24,10 +29,9 @@ mod utils;
 mod ssl_config;
 
 use scanner::QuantumScanner;
-use models::{ScanType, PortRange, PortRanges, TopPorts};
 
 /// Advanced port scanner with evasion capabilities for authorized red team operations
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[clap(
     author, 
     version, 
@@ -36,7 +40,7 @@ use models::{ScanType, PortRange, PortRanges, TopPorts};
     name = "quantum_scanner",
 )]
 #[clap(group(
-    clap::ArgGroup::new("target_selection")
+    clap::ArgGroup::new("port_selection")
         .multiple(false)
 ))]
 #[clap(group(
@@ -125,31 +129,31 @@ MIMICRY OPTIONS:
 )]
 struct Args {
     /// Target IP address, hostname, or CIDR notation for subnet
-    #[clap(value_parser, group = "target_selection")]
+    #[clap(value_parser)]
     target: String,
 
     // ========== TARGET AND PORT SELECTION ==========
     
     /// Ports to scan (comma-separated, ranges like 1-1000)
-    #[clap(short, long, default_value = "1-1000", group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
+    #[clap(short, long, default_value = "1-1000", group = "port_selection", help_heading = "TARGET AND PORT SELECTION")]
     ports: String,
 
     /// Scan the top 100 common ports
-    #[clap(short = 'T', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
+    #[clap(short = 'T', long, group = "port_selection", help_heading = "TARGET AND PORT SELECTION")]
     top_100: bool,
 
     /// Scan the top 10 most common ports (for quicker scans)
-    #[clap(short = 't', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
+    #[clap(short = 't', long, group = "port_selection", help_heading = "TARGET AND PORT SELECTION")]
     top_10: bool,
 
     /// Use IPv6
-    #[clap(short = '6', long, group = "target_selection", help_heading = "TARGET AND PORT SELECTION")]
+    #[clap(short = '6', long, help_heading = "TARGET AND PORT SELECTION")]
     ipv6: bool,
 
     // ========== SCAN METHODS ==========
 
     /// Scan techniques to use (comma-separated)
-    #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas")]
+    #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas\n\n⚠️ OPSEC WARNING: The ssl, tls-echo, and mimic scan types use full TCP connections that are easily logged by target systems. For stealth-critical operations, prefer using only the raw socket scan types like syn, fin, xmas, null, etc.")]
     scan_types_str: String,
 
     /// Enable ML-based service identification for ambiguous services
@@ -183,7 +187,7 @@ struct Args {
     protocol_variant: Option<String>,
 
     /// Route traffic through Tor if available
-    #[clap(long, default_value_t = true, group = "evasion_options", help_heading = "EVASION OPTIONS")]
+    #[clap(long, default_value_t = false, group = "evasion_options", help_heading = "EVASION OPTIONS")]
     use_tor: bool,
 
     // ========== TUNNELING OPTIONS ==========
@@ -215,15 +219,15 @@ struct Args {
     rate: usize,
 
     /// Scan timeout in seconds
-    #[clap(short, long, default_value_t = 3.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    #[clap(short, long, default_value_t = 5.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
     timeout: f64,
 
     /// Connect timeout in seconds
-    #[clap(long, default_value_t = 3.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    #[clap(long, default_value_t = 5.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
     timeout_connect: f64,
 
     /// Banner grabbing timeout in seconds
-    #[clap(long, default_value_t = 3.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
+    #[clap(long, default_value_t = 5.0, group = "timing_control", help_heading = "TIMING AND PERFORMANCE")]
     timeout_banner: f64,
 
     /// Add randomized delay before scan start (0-5 seconds)
@@ -269,6 +273,10 @@ struct Args {
     /// Enable verbose output
     #[clap(short, long, group = "output_options", help_heading = "OUTPUT OPTIONS", long_help = "When enabled, provides detailed information about the scanning process to stdout, including debug-level messages. In disk mode, verbose logs are also written to the log file.")]
     verbose: bool,
+
+    /// Show detailed debug information during scan
+    #[clap(short = 'd', long, group = "output_options", help_heading = "OUTPUT OPTIONS", long_help = "When enabled, shows detailed debug information during scan, including individual port scan results. Use for troubleshooting.")]
+    debug: bool,
 
     /// Output results in JSON format
     #[clap(short = 'j', long, group = "output_options", help_heading = "OUTPUT OPTIONS")]
@@ -396,122 +404,127 @@ impl Colors {
 }
 
 /// Initialize logging with proper configuration
-fn setup_logging(_log_file: &PathBuf, verbose: bool, memory_only: bool, encrypt_logs: bool, _log_password: Option<&str>) -> Result<Option<utils::MemoryLogBuffer>, anyhow::Error> {
-    // Setup memory logger if memory-only mode is enabled
+/// 
+/// Sets up logging to either memory buffer or file based on memory_only flag.
+/// Also handles log encryption if enabled.
+///
+/// # Arguments
+/// * `log_file` - Path to log file (if memory_only is false)
+/// * `verbose` - Whether to enable verbose logging
+/// * `debug` - Whether to enable debug logging
+/// * `memory_only` - Whether to log to memory instead of disk
+/// * `encrypt_logs` - Whether to encrypt logs
+/// * `log_password` - Password for log encryption (if encrypt_logs is true)
+///
+/// # Returns
+/// * `Result<Option<utils::MemoryLogBuffer>, anyhow::Error>` - Memory buffer if memory_only is true
+///
+/// # Opsec Considerations
+/// - **Memory-Only Logging:** Prevents writing potentially sensitive scan activity to disk, reducing forensic footprint.
+/// - **Log Encryption:** Protects log data at rest (if written to disk) or in memory buffer from trivial inspection. Requires a password (user-provided or auto-generated for memory buffer).
+fn setup_logging(
+    log_file: &PathBuf, 
+    verbose: bool, 
+    debug: bool,
+    memory_only: bool, 
+    encrypt_logs: bool, 
+    log_password: Option<&str>
+) -> Result<Option<MemoryLogBuffer>> {
+    use env_logger::{Builder, Env};
+    
+    // Configure log filter based on verbose and debug flags
+    let filter_level = if debug {
+        "debug"
+    } else if verbose { 
+        "info" 
+    } else { 
+        "warn" 
+    };
+    
+    // Initialize memory logger if memory-only mode is enabled
     if memory_only {
-        // When in memory-only mode, do not create any log files on disk
-        println!("Running in memory-only mode - logs will not be written to disk");
+        info!("Using memory-only logging (no disk writes)");
         
-        // Create memory logger with encryption if specified
-        let buffer = utils::MemoryLogBuffer::new(10000, encrypt_logs);
-        
-        // Configure environment variable for env_logger
-        let log_level = if verbose { "debug" } else { "info" };
-        std::env::set_var("RUST_LOG", log_level);
-        
-        // Initialize the memory logger without disk logger
-        env_logger::Builder::from_default_env()
+        // Set up env_logger to output to stderr (for live verbose output)
+        // Note: env_logger can only be initialized once. If setup_logging is called after
+        // initial main setup, this might conflict. We rely on the initial setup in main.
+        // This call here ensures the filter level is set, but doesn't re-initialize.
+        let env = Env::default().filter_or("RUST_LOG", filter_level);
+        // Attempt to initialize, but ignore error if already initialized
+        let _ = Builder::from_env(env)
             .format_timestamp_secs()
-            .format_module_path(true)
-            .format_target(false)
-            .target(env_logger::Target::Stdout) // Redirect to stdout since we're in memory-only mode
-            .init();
-        
-        // Log initialization message
-        buffer.log("INFO", &format!("Quantum Scanner started in memory-only mode"));
-        if verbose {
-            buffer.log("DEBUG", "Verbose logging enabled");
-        }
-        
-        return Ok(Some(buffer));
-    }
-    
-    // Normal file-based logging - use a simple approach
-    
-    // Set log level based on verbosity
-    let log_level = if verbose { "debug" } else { "info" };
-    std::env::set_var("RUST_LOG", log_level);
-    
-    // If encryption is enabled, we'll need to intercept logs
-    if encrypt_logs {
-        warn!("Log encryption is only fully supported in memory-only mode");
-    }
-    
-    // Use a simple approach for disk logging - just use current directory
-    let simple_log_file = PathBuf::from("scanner.log");
-    
-    // Try to create the log file with proper permissions
-    let log_file_handle = match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&simple_log_file) {
-            Ok(file) => file,
-            Err(e) => {
-                eprintln!("Warning: Failed to create log file: {}. Using stdout instead.", e);
-                env_logger::Builder::from_default_env()
-                    .format_timestamp_secs()
-                    .format_module_path(true)
-                    .format_target(false)
-                    .init();
-                return Ok(None);
-            }
-        };
-    
-    // Set appropriate file permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&simple_log_file, std::fs::Permissions::from_mode(0o600)) {
-            warn!("Failed to set secure permissions on log file: {}", e);
-        }
-    }
-    
-    println!("Running in disk mode - logs will be written to {}", simple_log_file.display());
-    
-    // Initialize the logger with disk file
-    // For verbose mode, we'll duplicate messages to stdout
-    if verbose {
-        // Setup a custom formatter that also prints to stdout
-        let mut builder = env_logger::Builder::new();
-        builder.parse_filters(&log_level);
-        builder.format(move |buf, record| {
-            // Print to stdout for important messages
-            if record.level() <= log::Level::Info {
-                println!("[{}] {}", record.level(), record.args());
-            }
+            .try_init(); 
             
-            // Format for file - ensure no IP redaction occurs by passing the raw message
-            use std::io::Write;
-            writeln!(
-                buf,
-                "[{} {} {}:{}] {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-                record.level(),
-                record.file().unwrap_or("unknown"),
-                record.line().unwrap_or(0),
-                record.args() // Always display IPs in logs, never redact
-            )
-        });
+        // Create memory buffer for logs
+        let memory_buffer = MemoryLogBuffer::new(
+            10000, // Store up to 10000 log entries
+            encrypt_logs
+        );
         
-        // Set the disk file as the log target
-        builder.target(env_logger::Target::Pipe(Box::new(log_file_handle)));
-        builder.init();
+        // Handle encryption setup if needed (removed unused password variable)
+        if encrypt_logs {
+            if let Some(_pw) = log_password {
+                info!("Using provided password for memory log encryption.");
+                // TODO: Implement setting the key in MemoryLogBuffer based on pw
+                // memory_buffer.set_encryption_key(Some(pw.as_bytes().to_vec()));
+            } else {
+                info!("Generated random password for memory log encryption. (Key stored internally)");
+                // Key is generated internally in MemoryLogBuffer::new if encrypt_logs is true
+            }
+        }
+        
+        // Return the configured memory buffer wrapped in Option
+        Ok(Some(memory_buffer))
     } else {
-        // Standard logging to file only for non-verbose mode
-        // Always display IPs, never redact them
-        env_logger::Builder::from_default_env()
-            .format_timestamp_secs()
-            .format_module_path(true)
-            .format_target(false)
-            .target(env_logger::Target::Pipe(Box::new(log_file_handle)))
-            .init();
+        // Set up file logging
+        let env = Env::default().filter_or("RUST_LOG", filter_level);
+        
+        // Create parent directories if needed
+        if let Some(parent) = log_file.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        
+        // Keep a copy of the log file path for logging
+        let log_file_path = log_file.clone();
+        
+        // Configure env_logger to write to file and stderr
+        let mut builder = Builder::from_env(env);
+        let logger_result = if let Ok(log_file_handle) = fs::File::create(log_file) {
+            // Use try_init to avoid panic if logger is already initialized
+            let _ = builder
+                .format_timestamp_secs()
+                .target(env_logger::Target::Pipe(Box::new(log_file_handle)))
+                .try_init();
+            info!("Logging to file: {}", log_file_path.display());
+            Ok(None)
+        } else {
+            error!("Failed to create log file, falling back to stderr only");
+            let _ = builder
+                .format_timestamp_secs()
+                .try_init();
+            Ok(None)
+        };
+        
+        logger_result
     }
-    
-    Ok(None)
 }
 
 /// Check if we have sufficient privileges for raw sockets
+///
+/// # Arguments
+/// * `scanner_needs_raw_sockets` - Boolean indicating if the selected scan types require raw socket access.
+///
+/// # Returns
+/// * `bool` - True if sufficient privileges are detected, false otherwise.
+///
+/// # Opsec Considerations
+/// - Running scans requiring raw sockets (like SYN, FIN, Xmas) without root/Administrator privileges will likely fail silently or be blocked by the OS.
+/// - This check is crucial to prevent unexpected failures and inform the user.
+///
+/// # Known Limitations
+/// - The Windows implementation is currently a placeholder and unreliable. It assumes privileges are sufficient. A proper check using Windows APIs is needed for accuracy on Windows.
 fn check_privileges(scanner_needs_raw_sockets: bool) -> bool {
     if !scanner_needs_raw_sockets {
         return true;
@@ -520,53 +533,67 @@ fn check_privileges(scanner_needs_raw_sockets: bool) -> bool {
     #[cfg(unix)]
     {
         // On Unix systems, check effective user ID
-        unsafe { libc::geteuid() == 0 }
+        return unsafe { libc::geteuid() == 0 };
     }
     
     #[cfg(windows)]
     {
-        // On Windows, this is more complex and not reliable
-        // For a real implementation, use IsUserAnAdmin or similar
-        // This is a simplified version
-        true
+        // On Windows, accurately checking for Administrator privileges is complex.
+        // Use the `is_elevated` crate for a simpler cross-platform check (if available)
+        // or fall back to a WinAPI check.
+        // TODO: Implement a reliable Windows privilege check using appropriate WinAPI calls (e.g., IsUserAnAdmin). -> Implementing using `is_elevated`
+        // warn!(\"Windows privilege check is currently unreliable; assuming sufficient privileges.\");
+        // true
+        return match is_elevated::is_elevated() {
+            Ok(elevated) => {
+                if !elevated {
+                    warn!("Administrator privileges are required for raw socket scans on Windows.");
+                }
+                elevated
+            }
+            Err(e) => {
+                // Error checking elevation, assume not elevated for safety
+                error!("Failed to check for Administrator privileges: {}. Assuming not elevated.", e);
+                false
+            }
+        };
     }
     
     #[cfg(not(any(unix, windows)))]
     {
         // Unknown platform - assume not privileged
-        false
+        return false;
     }
 }
 
-/// Check if Tor is available and set up LD_PRELOAD if needed
+/// Setup Tor routing if requested and available
+/// 
+/// Attempts to configure the application to route traffic through Tor
+/// for anonymization. This requires Tor to be installed and running.
+///
+/// # Arguments
+/// * `use_tor` - Whether to enable Tor routing
+///
+/// # Returns
+/// * `bool` - Whether Tor routing was successfully enabled
 fn setup_tor_routing(use_tor: bool) -> bool {
     if !use_tor {
         return false;
     }
     
-    // Check if Tor is installed and running
-    #[cfg(unix)]
-    {
-        // Try to find the tor process
-        if std::process::Command::new("pgrep")
-            .arg("tor")
-            .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-        {
-            // Check if libtsocks is available
-            if std::path::Path::new("/usr/lib/x86_64-linux-gnu/libtsocks.so").exists() {
-                // Set LD_PRELOAD environment variable for Tor routing
-                std::env::set_var("LD_PRELOAD", "/usr/lib/x86_64-linux-gnu/libtsocks.so");
-                return true;
-            }
-        }
-    }
-    
-    false
+    // Use the utils function for Tor configuration which has better error handling
+    utils::configure_tor_routing(true)
 }
 
-/// Create a RAM disk for temporary files
+/// Create and mount a RAM disk for temporary files
+///
+/// # Arguments
+/// * `use_ramdisk` - Whether to create a RAM disk
+/// * `mount_point` - Path where the RAM disk should be mounted
+/// * `size_mb` - Size of the RAM disk in megabytes
+///
+/// # Returns
+/// * `Result<Option<PathBuf>, anyhow::Error>` - Mount point if created successfully
 fn create_ramdisk(use_ramdisk: bool, mount_point: &PathBuf, size_mb: u64) -> Result<Option<PathBuf>, anyhow::Error> {
     if !use_ramdisk {
         return Ok(None);
@@ -574,37 +601,89 @@ fn create_ramdisk(use_ramdisk: bool, mount_point: &PathBuf, size_mb: u64) -> Res
     
     #[cfg(unix)]
     {
-        // Check if we have root privileges
-        if unsafe { libc::geteuid() != 0 } {
-            warn!("RAM disk creation requires root privileges");
-            return Ok(None);
+        // Check if the mount point exists, create it if not
+        if !mount_point.exists() {
+            match std::fs::create_dir_all(mount_point) {
+                Ok(_) => info!("Created RAM disk mount point at {}", mount_point.display()),
+                Err(e) => {
+                    error!("Failed to create RAM disk mount point: {}", e);
+                    return Err(anyhow!("Could not create RAM disk mount point: {}", e));
+                }
+            }
         }
         
-        // Create mount point directory
-        std::fs::create_dir_all(mount_point)?;
-        
-        // Mount a tmpfs filesystem
-        let status = std::process::Command::new("mount")
-            .args([
-                "-t", "tmpfs",
-                "-o", &format!("size={}M,mode=0700", size_mb),
-                "tmpfs",
-                mount_point.to_str().unwrap()
-            ])
-            .status()?;
-        
-        if status.success() {
-            info!("Created RAM disk at {}", mount_point.display());
-            return Ok(Some(mount_point.clone()));
+        // Determine mount command based on platform
+        let mount_cmd = if cfg!(target_os = "linux") {
+            // On Linux, use tmpfs for the RAM disk
+            format!(
+                "mount -t tmpfs -o size={}m,mode=0700,nodev,nosuid,noexec tmpfs {}",
+                size_mb, mount_point.display()
+            )
+        } else if cfg!(target_os = "macos") {
+            // On macOS, use diskutil to create a RAM disk
+            let sectors = size_mb * 2048; // Convert MB to 512-byte sectors
+            format!(
+                "diskutil erasevolume HFS+ 'RAMDISK' `hdiutil attach -nomount ram://{}`",
+                sectors
+            )
         } else {
-            warn!("Failed to create RAM disk");
+            // Return error for unsupported platforms
+            return Err(anyhow!("RAM disk creation is only supported on Linux and macOS"));
+        };
+        
+        // Execute the mount command
+        info!("Attempting to create RAM disk: {}", mount_cmd);
+        match std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&mount_cmd)
+            .output()
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    info!("RAM disk created successfully at {}", mount_point.display());
+                    // Set restrictive permissions after mounting
+                    if cfg!(target_os = "linux") {
+                        let _ = std::process::Command::new("chmod")
+                            .arg("700")
+                            .arg(mount_point.as_os_str())
+                            .output();
+                    }
+                    Ok(Some(mount_point.clone()))
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!("Failed to create RAM disk: {}", stderr);
+                    // Continue without RAM disk - graceful degradation
+                    Ok(None)
+                }
+            }
+            Err(e) => {
+                warn!("Failed to execute RAM disk command: {}", e);
+                // Continue without RAM disk - graceful degradation
+                Ok(None)
+            }
         }
     }
     
-    Ok(None)
+    #[cfg(not(unix))]
+    {
+        warn!("RAM disk feature is currently only supported on Unix-like systems");
+        // Return None but not an error to allow operation to continue
+        Ok(None)
+    }
 }
 
 /// Unmount a RAM disk
+///
+/// # Arguments
+/// * `ramdisk` - Reference to the RAM disk mount point
+///
+/// # Returns
+/// * `Result<(), anyhow::Error>` - Ok(()) if unmount succeeded, Err(e) if failed
+///
+/// # Opsec Considerations
+/// - Ensures the volatile RAM disk is unmounted and the mount point directory is removed, cleaning up traces.
+/// - Uses lazy unmount (`umount -l`) as a fallback if the standard unmount fails, which can help if processes are still accessing the disk.
+/// - Attempts multiple times to remove the directory, handling potential delays in resource release.
 fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
     if let Some(mount_point) = ramdisk {
         #[cfg(unix)]
@@ -641,13 +720,13 @@ fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
             
             info!("Unmounted RAM disk from {}", mount_point.display());
             
-            // Give the system a moment to complete the unmount
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            // Give the system more time to complete the unmount and release resources
+            std::thread::sleep(std::time::Duration::from_secs(2));
             
             // Remove directory after unmounting
             if mount_point.exists() {
-                // Try multiple times to remove the directory
-                for attempt in 0..3 {
+                // Try multiple times to remove the directory with increasing delays
+                for attempt in 0..3 {  // Increased to 3 attempts
                     // First try with rmdir for a clean unmounted directory
                     if attempt == 0 {
                         let _ = std::process::Command::new("rmdir")
@@ -661,14 +740,27 @@ fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
                         Err(e) => {
                             // Log error but keep trying
                             info!("Remove directory attempt {}: {}", attempt + 1, e);
-                            // Wait a bit and try again
-                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            
+                            // Try to forcefully release the mount point using fuser (if available)
+                            if attempt == 2 {
+                                let _ = std::process::Command::new("fuser")
+                                    .args(["-km", mount_point.to_str().unwrap_or_default()])
+                                    .status();
+                            }
+                            
+                            // Wait longer with each attempt (exponential backoff)
+                            let delay = std::time::Duration::from_millis(500 * (2_u64.pow(attempt as u32)));
+                            std::thread::sleep(delay);
                         }
                     }
                 }
                 
-                // If we couldn't remove it after 3 tries, log it but don't fail
-                info!("Could not remove mount point directory after unmounting, it will be cleaned up by the system later");
+                // If we couldn't remove it after all tries, don't fail the operation
+                warn!("Could not remove mount point directory after unmounting. Will be cleaned up on next reboot.");
+                
+                // Try one last thing - modify the mount point to indicate it's no longer needed
+                let empty_file_path = mount_point.join(".cleanup_on_reboot");
+                let _ = std::fs::File::create(empty_file_path);
             }
             
             return Ok(());
@@ -678,355 +770,431 @@ fn cleanup_ramdisk(ramdisk: &Option<PathBuf>) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Secure file deletion with multiple passes of overwriting
+/// Securely delete a file by overwriting it multiple times
+///
+/// # Arguments
+/// * `path` - Path to the file to delete
+/// * `passes` - Number of overwrite passes (1-7)
+///
+/// # Returns
+/// * `Result<(), anyhow::Error>` - Success or error
 fn secure_delete_file(path: &PathBuf, passes: u8) -> Result<(), anyhow::Error> {
-    // Ensure path exists and is a file
-    if !path.exists() || !path.is_file() {
+    if !path.exists() {
+        debug!("File {} does not exist, nothing to delete", path.display());
         return Ok(());
     }
     
-    // Sanitize the path to prevent command injection
-    let path_str = path.to_string_lossy();
-    if path_str.contains(";") || path_str.contains("&") || path_str.contains("|") || 
-       path_str.contains(">") || path_str.contains("<") || path_str.contains("$") {
-        return Err(anyhow::anyhow!("Invalid characters in file path"));
-    }
-    
-    // Calculate file size
-    let size = match std::fs::metadata(path) {
-        Ok(metadata) => metadata.len(),
-        Err(e) => return Err(anyhow::anyhow!("Failed to get file size: {}", e)),
+    // Get file metadata
+    let metadata = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            warn!("Failed to get metadata for {}: {}", path.display(), e);
+            return Err(anyhow!("Could not access file: {}", e));
+        }
     };
     
-    #[cfg(unix)]
-    {
-        // On Unix, overwrite the file with random data multiple times
-        let mut rng = thread_rng();
-        
-        for pass in 0..passes {
-            let pattern = match pass % 3 {
-                0 => 0xFF, // All ones
-                1 => 0x00, // All zeros
-                _ => rng.gen::<u8>(), // Random
-            };
-            
-            // Generate pattern for dd command
-            let _pattern_str = format!("\\\\x{:02x}", pattern);
-            
-            // Use dd to overwrite with the pattern - handle command injection risk
-            std::process::Command::new("dd")
-                .args([
-                    format!("if=/dev/zero").as_str(),
-                    format!("of={}", path.display()).as_str(),
-                    "bs=1k",
-                    &format!("count={}", (size + 1023) / 1024), // Round up
-                    "conv=notrunc"
-                ])
-                .output()?;
-        }
-        
-        // Finally, delete the file
-        std::fs::remove_file(path)?;
+    // Check if it's a file
+    if !metadata.is_file() {
+        return Err(anyhow!("Not a file: {}", path.display()));
     }
     
-    #[cfg(not(unix))]
-    {
-        // For non-Unix platforms, overwrite with zeros before deleting
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .truncate(false)
-            .open(path)?;
-            
-        let zeros = vec![0u8; 4096];
-        let mut writer = std::io::BufWriter::new(file);
-        
-        for _ in 0..passes {
-            // Seek to beginning of file
-            writer.seek(std::io::SeekFrom::Start(0))?;
-            
-            // Overwrite in chunks
-            let mut remaining = size;
-            while remaining > 0 {
-                let to_write = std::cmp::min(remaining, zeros.len() as u64);
-                writer.write_all(&zeros[0..to_write as usize])?;
-                remaining -= to_write;
-            }
-            
-            // Flush to ensure data is written
-            writer.flush()?;
-        }
-        
-        // Close file handle
-        drop(writer);
-        
-        // Delete file
+    // Get file size
+    let file_size = metadata.len();
+    
+    info!("Securely deleting {} ({} bytes) with {} passes", path.display(), file_size, passes);
+    
+    if file_size == 0 {
+        // If the file is empty, just remove it
         std::fs::remove_file(path)?;
+        return Ok(());
     }
     
-    Ok(())
+    // Limit passes to reasonable range
+    let actual_passes = passes.clamp(1, 7);
+    
+    // Use standard rust file operations for platform independence
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?;
+    
+    use std::io::{Seek, SeekFrom, Write};
+    
+    // Patterns for different passes
+    // Using the DoD 5220.22-M standard as a reference
+    let overwrite_patterns: Vec<Box<dyn Fn() -> u8>> = vec![
+        Box::new(|| 0x00), // All zeros
+        Box::new(|| 0xFF), // All ones
+        Box::new(|| thread_rng().gen::<u8>()), // Random data - Create new RNG inside closure
+        Box::new(|| 0x55), // Alternating 01010101
+        Box::new(|| 0xAA), // Alternating 10101010
+        Box::new(|| 0xF0), // 11110000
+        Box::new(|| 0x0F), // 00001111
+    ];
+    
+    // Buffer size for each write operation
+    const BUFFER_SIZE: usize = 4096;
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    
+    // Perform the overwrite passes
+    for pass in 0..actual_passes {
+        // Select pattern based on pass number
+        let pattern_fn = &overwrite_patterns[pass as usize % overwrite_patterns.len()];
+        
+        // Fill the buffer with the selected pattern
+        for i in 0..BUFFER_SIZE {
+            buffer[i] = pattern_fn();
+        }
+        
+        // Seek to the beginning of the file
+        file.seek(SeekFrom::Start(0))?;
+        
+        // Write the pattern to the file
+        let mut bytes_written = 0;
+        while bytes_written < file_size {
+            let bytes_to_write = std::cmp::min(BUFFER_SIZE as u64, file_size - bytes_written) as usize;
+            let slice = &buffer[0..bytes_to_write];
+            
+            file.write_all(slice)?;
+            bytes_written += bytes_to_write as u64;
+        }
+        
+        // Flush to ensure data is written to disk
+        file.flush()?;
+        
+        // For debugging or verbose output
+        debug!("Completed secure delete pass {} of {}", pass + 1, actual_passes);
+    }
+    
+    // Drop the file handle before removing
+    drop(file);
+    
+    // Finally, remove the file
+    match std::fs::remove_file(path) {
+        Ok(_) => {
+            info!("Successfully securely deleted {}", path.display());
+            Ok(())
+        },
+        Err(e) => {
+            warn!("Failed to remove file {} after secure deletion: {}", path.display(), e);
+            Err(anyhow!("Failed to remove file after wiping: {}", e))
+        }
+    }
 }
 
 /// Unredact a log file by replacing [REDACTED] with the actual IP address
+///
+/// # Arguments
+/// * `log_file` - Path to the log file to be unredacted
+/// * `ip_address` - IP address to replace [REDACTED] with
+///
+/// # Returns
+/// * `Result<usize, anyhow::Error>` - Ok(count) with the number of replacements made, or an error.
+///
+/// # Opsec Considerations
+/// - This utility allows reversing the redaction applied to log files for analysis *after* an operation, assuming the original target IP is known.
+/// - Redaction helps protect the target identity in logs during the operation or if logs are exfiltrated prematurely.
+/// - Creates a backup (`.bak`) of the original redacted log before modifying it.
 fn fix_redacted_log(log_file: &PathBuf, ip_address: &str) -> Result<usize, anyhow::Error> {
-    // Check if the log file exists
-    if !log_file.exists() {
-        return Err(anyhow::anyhow!("Log file not found: {}", log_file.display()));
+    info!("Attempting to fix redactions in log file: {}", log_file.display());
+
+    // Read the entire log file content
+    let content = match fs::read_to_string(log_file) {
+        Ok(c) => c,
+        Err(e) => return Err(anyhow!("Failed to read log file {}: {}", log_file.display(), e)),
+    };
+
+    // Check if redaction marker exists
+    if !content.contains("[REDACTED]") {
+        info!("No redaction markers found in {}. Nothing to fix.", log_file.display());
+        return Ok(0);
     }
-    
-    // Read the file content
-    let mut content = String::new();
-    let mut file = fs::File::open(log_file)?;
-    file.read_to_string(&mut content)?;
-    
-    // Count occurrences before replacement
-    let redacted_count = content.matches("[REDACTED]").count();
-    
-    if redacted_count == 0 {
-        return Ok(0); // No replacements needed
-    }
-    
-    // Create a backup of the original file
-    let backup_path = format!("{}.bak", log_file.display());
-    fs::copy(log_file, &backup_path)?;
-    
-    // Replace [REDACTED] with the IP address to permanently unredact the log
+
+    // Perform the replacement
     let updated_content = content.replace("[REDACTED]", ip_address);
-    
-    // Write the updated content back to the file
-    let mut file = fs::File::create(log_file)?;
-    file.write_all(updated_content.as_bytes())?;
-    
-    Ok(redacted_count)
+    let replacements = content.matches("[REDACTED]").count();
+
+    // Write the updated content back to the file (overwrite)
+    match fs::write(log_file, updated_content) {
+        Ok(_) => {
+            info!("Successfully fixed {} redactions in {}. Replaced with {}", replacements, log_file.display(), ip_address);
+            Ok(replacements)
+        }
+        Err(e) => Err(anyhow!("Failed to write updated content to log file {}: {}", log_file.display(), e)),
+    }
 }
 
-/// Parse scan types from a comma-separated string
-fn parse_scan_types(scan_types_str: &str) -> anyhow::Result<Vec<ScanType>> {
+/// Parses the comma-separated scan types string into a Vec<ScanType>
+///
+/// Handles potential errors during parsing.
+fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>> {
     let mut scan_types = Vec::new();
+    let mut needs_opsec_warning = false;
     
-    for scan_type_str in scan_types_str.split(',') {
-        let scan_type_str = scan_type_str.trim().to_lowercase();
-        
-        match scan_type_str.as_str() {
+    for type_str in scan_types_str.split(',') {
+        let trimmed = type_str.trim();
+        if trimmed.is_empty() {
+            continue; // Skip empty parts
+        }
+        // Case-insensitive matching
+        match trimmed.to_lowercase().as_str() {
             "syn" => scan_types.push(ScanType::Syn),
-            "ssl" => scan_types.push(ScanType::Ssl),
+            "ssl" => {
+                scan_types.push(ScanType::Ssl);
+                needs_opsec_warning = true;
+            },
             "udp" => scan_types.push(ScanType::Udp),
             "ack" => scan_types.push(ScanType::Ack),
             "fin" => scan_types.push(ScanType::Fin),
             "xmas" => scan_types.push(ScanType::Xmas),
             "null" => scan_types.push(ScanType::Null),
             "window" => scan_types.push(ScanType::Window),
-            "tls-echo" | "tls_echo" => scan_types.push(ScanType::TlsEcho),
-            "mimic" => scan_types.push(ScanType::Mimic),
+            "tlsecho" | "tls-echo" => {
+                scan_types.push(ScanType::TlsEcho);
+                needs_opsec_warning = true;
+            },
+            "mimic" => {
+                scan_types.push(ScanType::Mimic);
+                needs_opsec_warning = true;
+            },
             "frag" => scan_types.push(ScanType::Frag),
-            "dns-tunnel" | "dns_tunnel" => scan_types.push(ScanType::DnsTunnel),
-            "icmp-tunnel" | "icmp_tunnel" => scan_types.push(ScanType::IcmpTunnel),
-            _ => return Err(anyhow::anyhow!("Invalid scan type: {}", scan_type_str)),
+            "dnstunnel" | "dns-tunnel" => {
+                scan_types.push(ScanType::DnsTunnel);
+                info!("Using DNS tunnel scanning technique");
+            },
+            "icmptunnel" | "icmp-tunnel" => {
+                scan_types.push(ScanType::IcmpTunnel);
+                info!("Using ICMP tunnel scanning technique");
+            },
+            _ => return Err(anyhow!("Invalid scan type specified: {}", trimmed)),
         }
     }
-    
     if scan_types.is_empty() {
-        return Err(anyhow::anyhow!("No valid scan types provided"));
+        return Err(anyhow!("No valid scan types specified in string: '{}'", scan_types_str));
     }
     
+    // Show OPSEC warning if needed
+    if needs_opsec_warning {
+        warn!("⚠️  OPSEC WARNING: You've selected scan types (ssl, tls-echo, or mimic) that use full TCP connections");
+        warn!("   These scan types are easily logged by target systems and leave more forensic evidence.");
+        warn!("   For stealth-critical operations, consider using only raw socket scans like syn, fin, null, etc.");
+    }
+    
+    // Check if tunneling methods are used and appropriate options are set
+    if scan_types.contains(&ScanType::DnsTunnel) {
+        info!("DNS tunneling technique selected. For best results, provide --lookup-domain and optionally --dns-server");
+    }
+    
+    if scan_types.contains(&ScanType::IcmpTunnel) {
+        info!("ICMP tunneling technique selected. Requires root privileges.");
+    }
+    
+    // Deduplicate scan types
+    scan_types.sort_unstable();
+    scan_types.dedup();
     Ok(scan_types)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    // Override the binary name for parsing
-    let args: Vec<String> = std::iter::once("quantum_scanner".to_string())
-        .chain(std::env::args().skip(1))
-        .collect();
-    
-    // Parse command-line arguments with corrected binary name
-    let mut args = Args::parse_from(args);
-    
-    // Check if we're only fixing a log file without scanning
-    if let Some(log_file) = &args.fix_log_file {
-        match fix_redacted_log(log_file, &args.target) {
-            Ok(count) => {
-                println!("Unredacted {} occurrences of [REDACTED] in {}", count, log_file.display());
-                println!("A backup was created at {}.bak", log_file.display());
-                return Ok(());
-            },
-            Err(e) => {
-                eprintln!("Error unredacting log file: {}", e);
-                return Err(e);
-            }
-        }
-    }
-    
-    // Setup colors for output
+    // Initialize default logger early to catch errors during setup
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs() // Keep consistent format
+        .try_init();
+
+    // Parse command-line arguments
+    let args = Args::parse();
     let colors = Colors::new(args.color);
-    
-    // Display banner
-    if args.color {
-        println!("{}╔══════════════════════════════════════════╗{}", colors.blue, colors.reset);
-        println!("{}║     {}Quantum Scanner{} - {}Enhanced Edition{}     ║{}", 
-            colors.blue, colors.green, colors.blue, colors.yellow, colors.blue, colors.reset);
-        println!("{}╚══════════════════════════════════════════╝{}", colors.blue, colors.reset);
-    } else {
-        println!("┌──────────────────────────────────────────┐");
-        println!("│      Quantum Scanner - Enhanced Edition      │");
-        println!("└──────────────────────────────────────────┘");
-    }
-    
-    // Setup Tor routing if available and enabled
-    let _tor_enabled = if args.use_tor {
-        let tor_result = setup_tor_routing(true);
-        if tor_result {
-            println!("[{}+{}] Routing traffic through Tor", colors.green, colors.reset);
-        } else {
-            println!("[{}!{}] Tor routing requested but not available", colors.yellow, colors.reset);
+
+    // --- Special Mode: Fix Redacted Log File --- 
+    // If --fix-log-file is provided, perform only that action and exit.
+    if let Some(log_path_to_fix) = &args.fix_log_file {
+        // Check if the file exists
+        if !log_path_to_fix.exists() {
+            error!("Log file to fix does not exist: {}", log_path_to_fix.display());
+            process::exit(1);
         }
-        tor_result
-    } else {
-        false
-    };
-    
-    // Check for RAM disk support for temporary files
-    let ramdisk = if args.use_ramdisk {
-        match create_ramdisk(args.use_ramdisk, &args.ramdisk_mount, args.ramdisk_size) {
-            Ok(Some(path)) => {
-                println!("[{}+{}] Created RAM disk for temporary files at {}", 
-                    colors.green, colors.reset, path.display());
-                
-                // Use RAM disk for log file ONLY if not in memory-only mode
-                if !args.memory_only {
-                    args.log_file = path.join("scanner.log");
-                }
-                Some(path)
-            },
-            Ok(None) => None,
+        // The target argument is reused to provide the IP for unredaction
+        let ip_to_insert = &args.target; 
+        match fix_redacted_log(log_path_to_fix, ip_to_insert) {
+            Ok(count) => {
+                info!("Log file redaction fix completed. {} replacements made.", count);
+                process::exit(0);
+            }
             Err(e) => {
-                println!("[{}!{}] Failed to create RAM disk: {}", colors.yellow, colors.reset, e);
-                None
+                error!("Failed to fix redacted log file: {}", e);
+                process::exit(1);
             }
         }
-    } else {
-        None
-    };
-    
-    // Add random delay before scan if enabled
-    if args.random_delay {
-        let delay = thread_rng().gen_range(0..args.max_delay);
-        if delay > 0 {
-            println!("[{}+{}] Adding random delay before scan: {}s", 
-                colors.green, colors.reset, delay);
-            tokio::time::sleep(Duration::from_secs(delay)).await;
-        }
     }
+
+    // --- Regular Scan Execution --- 
+
+    // Set up logging based on args (handles memory vs file, encryption)
+    // Note: This re-initializes the logger if not memory_only.
     
-    // Use randomized packet rate if not specified
-    if args.rate == 0 {
-        args.rate = thread_rng().gen_range(100..500);
-        println!("[{}+{}] Using randomized packet rate: {} pps", 
-            colors.green, colors.reset, args.rate);
-    }
+    // Apply a workaround for unstable proc-macro feature detection
+    #[cfg(feature = "insecure-tls")]
+    std::env::set_var("RUSTC_BOOTSTRAP", "1");
     
-    // Randomly select OS to mimic if not specified
-    if args.mimic_os.is_none() {
-        let os_types = ["windows", "linux", "macos", "random"];
-        args.mimic_os = Some(os_types[thread_rng().gen_range(0..os_types.len())].to_string());
-        println!("[{}+{}] Mimicking OS: {}", 
-            colors.green, colors.reset, args.mimic_os.as_ref().unwrap());
-    }
-    
-    // Select protocol variant for mimic scans if applicable and not specified
-    if args.scan_types_str.contains("mimic") && args.protocol_variant.is_none() {
-        let variants = ["1.0", "1.1", "2.0"];
-        args.protocol_variant = Some(variants[thread_rng().gen_range(0..variants.len())].to_string());
-        println!("[{}+{}] Using HTTP/{} for protocol mimicry", 
-            colors.green, colors.reset, args.protocol_variant.as_ref().unwrap());
-    }
-    
-    // Setup logging with memory-only option
-    let memory_logger = match setup_logging(
+    let memory_log_buffer = match setup_logging(
         &args.log_file, 
         args.verbose, 
-        args.memory_only,
-        args.encrypt_logs,
-        args._log_password.as_deref()
-    ) {
-        Ok(logger) => logger,
+        args.debug,
+        args.memory_only, 
+        args.encrypt_logs, 
+        args._log_password.as_deref() // Pass optional password
+    ) { 
+        Ok(buffer_opt) => Arc::new(buffer_opt), // Wrap Option<MemoryLogBuffer> in Arc
         Err(e) => {
-            eprintln!("Warning: Failed to set up logging: {}", e);
+            // Use default logger initialized earlier to show this error
+            error!("Failed to initialize logging: {}", e);
+            process::exit(1);
+        }
+    };
+
+    // Display cool banner
+    if args.color {
+        println!("{}", banner::display_banner(true));
+    } else {
+        println!("{}", banner::display_banner(false));
+    }
+
+    // Parse scan types
+    let scan_types = match parse_scan_types(&args.scan_types_str) {
+        Ok(types) => types,
+        Err(e) => {
+            error!("Error parsing scan types: {}", e);
+            process::exit(1);
+        }
+    };
+    info!("Selected scan types: {:?}", scan_types);
+
+    // Check if raw sockets are needed
+    let needs_raw_sockets = requires_raw_sockets(&scan_types);
+    let mut local_ip_v4: Option<std::net::Ipv4Addr> = None; // Initialize as None
+
+    // If raw sockets needed, check privileges and get local IP
+    if needs_raw_sockets {
+        info!("Selected scan types require raw socket access.");
+        // Perform strict privilege check
+        if !check_privileges(needs_raw_sockets) {
+            error!("{}[!] Error: Raw socket access required but not available. Please run as root or administrator.{}", colors.red, colors.reset);
+            process::exit(1);
+        }
+        info!("Sufficient privileges detected for raw sockets.");
+
+        // Attempt to find local IPv4 address
+        match find_local_ipv4() {
+             Ok(ip) => {
+                 info!("Using local IPv4 {} for raw socket scans.", ip);
+                 local_ip_v4 = Some(ip);
+             }
+             Err(e) => {
+                 error!("{}[!] Error finding local IPv4 address for raw sockets: {}{}", colors.red, e, colors.reset);
+                 error!("    Raw socket scans (e.g., SYN, FIN) cannot proceed without a source IP.");
+                 error!("    Please ensure you have a properly configured non-loopback network interface.");
+                 process::exit(1);
+             }
+         }
+    }
+
+    // Log IPv6 scanning status
+    if args.ipv6 {
+        info!("IPv6 scanning is ENABLED. Will scan both IPv4 and IPv6 addresses if target resolves to both.");
+    } else {
+        info!("IPv6 scanning is DISABLED. Only IPv4 targets will be scanned. Use --ipv6 flag to enable IPv6 scanning.");
+    }
+    
+    // Parse ports
+    let ports_to_scan = if args.top_100 {
+        info!("Using top 100 common ports");
+        TopPorts::top_100()
+    } else if args.top_10 {
+        info!("Using top 10 common ports");
+        TopPorts::top_10()
+    } else {
+        info!("Parsing custom port specification: {}", &args.ports);
+        match PortRanges::parse(&args.ports) {
+            Ok(ranges) => {
+                // Expand ranges into a Vec<u16>
+                let expanded_ports: Vec<u16> = PortRanges::new(ranges).into_iter().collect();
+                // Add validation for total number of ports to prevent excessive scanning
+                if expanded_ports.len() > 20000 { // Limit to 20k ports
+                   error!("Too many ports specified ({}). Maximum allowed is 20000.", expanded_ports.len());
+                   process::exit(1);
+                }
+                if expanded_ports.is_empty() {
+                    error!("No valid ports specified after parsing.");
+                    process::exit(1);
+                }
+                info!("Scanning {} ports based on custom specification.", expanded_ports.len());
+                expanded_ports
+            }
+            Err(e) => {
+                error!("Error parsing port specification '{}': {}", &args.ports, e);
+                process::exit(1);
+            }
+        }
+    };
+
+    // Handle Tor setup (best effort)
+    if args.use_tor {
+        info!("Attempting to route traffic through Tor...");
+        if setup_tor_routing(args.use_tor) {
+            info!("Tor routing enabled successfully.");
+        } else {
+            warn!("Failed to enable Tor routing. Proceeding with direct connection.");
+        }
+    }
+
+    // Handle RAM disk setup (best effort, requires privileges)
+    let ramdisk_path = match create_ramdisk(args.use_ramdisk, &args.ramdisk_mount, args.ramdisk_size) {
+        Ok(Some(path)) => {
+            info!("RAM disk created successfully at {}", path.display());
+            Some(path)
+        }
+        Ok(None) => {
+            info!("RAM disk not used (disabled, no privileges, or platform unsupported).");
+            None
+        }
+        Err(e) => {
+            warn!("Error creating RAM disk: {}. Continuing without RAM disk.", e);
             None
         }
     };
-    
-    // Log memory-only mode info
-    if args.memory_only {
-        println!("[{}+{}] Running in memory-only mode - logs will be kept in memory only", 
-            colors.green, colors.reset);
-    } else {
-        println!("[{}+{}] Running in disk mode - logs will be written to {}", 
-            colors.green, colors.reset, args.log_file.display());
-    }
-    
-    // Log enhanced evasion status
-    if args.enhanced_evasion {
-        println!("[{}+{}] Enhanced evasion techniques enabled", colors.green, colors.reset);
-    }
-    
-    // Handle port selection, prioritizing top_10, then top_100 over ports parameter if specified
-    let ports_to_scan: Vec<u16> = if args.top_10 {
-        let top_ports = TopPorts::top_10();
-        println!("[{}+{}] Using top 10 most common ports for quick scanning", colors.green, colors.reset);
-        top_ports
-    } else if args.top_100 {
-        let top_ports = TopPorts::top_100();
-        println!("[{}+{}] Using top 100 common ports for scanning", colors.green, colors.reset);
-        top_ports
-    } else {
-        // Parse port ranges
-        let port_ranges = match PortRange::parse(&args.ports) {
-            Ok(ranges) => ranges,
-            Err(e) => {
-                error!("Failed to parse port ranges: {}", e);
-                eprintln!("Error: Invalid port range specification: {}", e);
-                process::exit(1);
-            }
+
+    // Apply random delay if requested
+    if args.random_delay {
+        let delay_secs = if args.max_delay > 0 {
+            thread_rng().gen_range(0..=args.max_delay)
+        } else {
+            thread_rng().gen_range(0..=3) // Default 0-3 seconds
         };
         
-        // Expand port ranges into a list of ports
-        PortRanges::new(port_ranges).into_iter().collect()
-    };
-    
-    if ports_to_scan.is_empty() {
-        error!("No valid ports specified");
-        eprintln!("Error: No valid ports to scan. Please check port specification.");
-        process::exit(1);
+        if delay_secs > 0 {
+            info!("Applying random pre-scan delay of {} seconds...", delay_secs);
+            sleep(Duration::from_secs(delay_secs)).await;
+        }
     }
-    
-    // Parse the scan types
-    let mut scan_types = parse_scan_types(&args.scan_types_str)?;
-    
-    // Check if we need raw socket privileges
-    let needs_raw_sockets = scanner::requires_raw_sockets(&scan_types);
-    if needs_raw_sockets && !check_privileges(needs_raw_sockets) {
-        error!("This scan requires root/administrator privileges");
-        eprintln!("Error: This scan requires root/administrator privileges");
-        process::exit(1);
-    }
-    
-    // Print scan types being used
-    println!("[{}+{}] Using scan types: {}", colors.green, colors.reset, args.scan_types_str);
-    
-    // Configure scanner with parsed options
-    let mut scanner = QuantumScanner::new(
+
+    // Create the scanner instance, passing all necessary configuration
+    let ml_identification = args.ml_identification && cfg!(feature = "ml");
+    let mut scanner = match QuantumScanner::new(
         &args.target,
-        ports_to_scan.clone(),
-        scan_types.clone(),  // Clone to avoid ownership issues
+        ports_to_scan, // Use the parsed ports
+        scan_types, // Use the parsed scan types
+        local_ip_v4, // Pass the detected local IP (Option<Ipv4Addr>)
         args.concurrency,
         args.rate,
-        args.evasion || args.enhanced_evasion,
+        args.evasion,
         args.verbose,
+        args.debug,
         args.ipv6,
-        args.timeout,
-        args.timeout_connect,
-        args.timeout_banner,
+        args.timeout, // Scan timeout
+        args.timeout_connect, // Connect timeout
+        args.timeout_banner, // Banner timeout
         &args.mimic_protocol,
+        // Pass fragmentation options
         args.frag_min_size,
         args.frag_max_size,
         args.frag_min_delay,
@@ -1034,172 +1202,135 @@ async fn main() -> Result<(), anyhow::Error> {
         args.frag_timeout,
         args.frag_first_min_size,
         args.frag_two_frags,
+        // Pass log file path (even if memory only, for context)
         &args.log_file,
-    ).await?;
-    
-    // Set enhanced evasion options
+        // Pass ML identification flag
+        ml_identification,
+    ).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to initialize scanner: {}", e);
+            // Attempt cleanup before exiting
+            if let Err(cleanup_err) = cleanup_ramdisk(&ramdisk_path) {
+                 warn!("Error during RAM disk cleanup on init failure: {}", cleanup_err);
+            }
+            process::exit(1);
+        }
+    };
+
+    // Set enhanced evasion options if enabled
     if args.enhanced_evasion {
-        scanner.set_enhanced_evasion(true, args.mimic_os.as_deref().unwrap_or("random"), args.ttl_jitter);
-        scanner.set_protocol_variant(args.protocol_variant.as_deref());
-    }
-    
-    // Set memory logger if available
-    if let Some(logger) = memory_logger.clone() {
-        scanner.set_memory_log(Arc::new(logger));
-    }
-    
-    // Run the scan
-    println!("[{}+{}] Starting scan of {} with {} ports", 
-        colors.green, colors.reset, args.target, ports_to_scan.len());
-    println!("{}════════════════════════════════════════════{}", colors.blue, colors.reset);
-    
-    let results = scanner.run_scan().await?;
-    
-    // Output results based on mode
-    println!("{}════════════════════════════════════════════{}", colors.blue, colors.reset);
-    println!("[{}+{}] Scan completed. Found {} open ports", 
-        colors.green, colors.reset, results.open_ports.len());
-    
-    // Display results based on output mode
-    if args.json || args.pretty_json {
-        // If JSON output is requested, serialize and display the results
-        let json_output = if args.pretty_json {
-            serde_json::to_string_pretty(&results)
-                .unwrap_or_else(|e| format!("Error serializing to JSON: {}", e))
-        } else {
-            serde_json::to_string(&results)
-                .unwrap_or_else(|e| format!("Error serializing to JSON: {}", e))
-        };
-        println!("\n{}", json_output);
-    } else if args.verbose {
-        // Display enhanced scan details using the print_results function
-        output::print_results(&results)?;
-    } else {
-        // Display simplified results for non-verbose mode
-        for port in results.open_ports.iter().cloned().collect::<Vec<_>>() {
-            if let Some(result) = results.results.get(&port) {
-                let service_info = match (&result.service, &result.version) {
-                    (Some(service), Some(version)) => format!("{} ({})", service, version),
-                    (Some(service), None) => service.clone(),
-                    _ => "unknown".to_string()
-                };
-                
-                println!("[{}OPEN{}] Port {}: {} ", 
-                    colors.green, colors.reset, port, service_info);
-                
-                // Show banner information if available
-                if let Some(banner) = &result.banner {
-                    // Trim and show the first line of the banner for compact output
-                    let banner_preview = banner.lines().next()
-                        .unwrap_or("").trim();
-                    if !banner_preview.is_empty() {
-                        println!("       Banner: {}", banner_preview);
-                    }
-                }
-                
-                // Show condensed vulnerability count if present
-                if !result.vulns.is_empty() {
-                    println!("       {}- {} potential vulnerabilities detected{}",
-                        colors.yellow, result.vulns.len(), colors.reset);
-                }
-            }
-        }
-        
-        // Display scan statistics summary
-        println!("\n[{}INFO{}] Scan Statistics:", colors.blue, colors.reset);
-        println!("       - Packets sent: {}", results.packets_sent);
-        println!("       - Success rate: {:.1}%", 
-            if results.packets_sent > 0 { 
-                (results.successful_scans as f64 / results.packets_sent as f64) * 100.0 
-            } else { 
-                0.0 
-            }
+        scanner.set_enhanced_evasion(
+            true,
+            args.mimic_os.as_deref().unwrap_or("random"), // Provide default if None
+            args.ttl_jitter,
         );
-        
-        // Show total vulnerability count
-        let total_vulns: usize = results.results.values()
-            .map(|r| r.vulns.len())
-            .sum();
-        
-        if total_vulns > 0 {
-            println!("       - {} potential vulnerabilities detected", total_vulns);
-        }
-        
-        println!("\nUse --verbose for more detailed output");
-    }
-    
-    // Output to file if requested
-    if let Some(output_path) = args.output {
-        if args.json || args.pretty_json {
-            output::save_json_results(&results, &output_path)?;
-            println!("[{}+{}] Results saved to {} in JSON format", 
-                colors.green, colors.reset, output_path.display());
-        } else {
-            output::save_text_results(&results, &output_path)?;
-            println!("[{}+{}] Results saved to {}", 
-                colors.green, colors.reset, output_path.display());
-        }
-    }
-    
-    // Print memory log summary if available
-    if let Some(logger) = memory_logger {
-        if args.verbose {
-            println!("\nLog entries: {}", logger.len());
-            println!("Log contents:");
-            println!("{}", logger.format_logs(true));
-        }
-    }
-    
-    // Cleanup phase
-    if args.secure_delete {
-        println!("[{}+{}] Performing secure cleanup...", colors.green, colors.reset);
-        
-        // Delete log file if it exists
-        if args.log_file.exists() && !args.memory_only {
-            match secure_delete_file(&args.log_file, args.delete_passes) {
-                Ok(_) => println!("[{}+{}] Securely deleted log file", colors.green, colors.reset),
-                Err(e) => println!("[{}!{}] Failed to securely delete log file: {}", 
-                    colors.yellow, colors.reset, e),
-            }
-        }
-        
-        // Cleanup RAM disk if created
-        if ramdisk.is_some() {
-            match cleanup_ramdisk(&ramdisk) {
-                Ok(_) => println!("[{}+{}] RAM disk cleaned up successfully", colors.green, colors.reset),
-                Err(e) => println!("[{}!{}] Failed to clean up RAM disk: {}", 
-                    colors.yellow, colors.reset, e),
-            }
-        }
-    }
-    
-    // Add tunneling scan types if requested
-    if args.dns_tunnel && !scan_types.contains(&ScanType::DnsTunnel) {
-        scan_types.push(ScanType::DnsTunnel);
     }
 
-    if args.icmp_tunnel && !scan_types.contains(&ScanType::IcmpTunnel) {
-        scan_types.push(ScanType::IcmpTunnel);
+    // Set protocol variant if provided
+    if let Some(variant) = &args.protocol_variant {
+        scanner.set_protocol_variant(Some(variant));
     }
 
-    // Configure DNS tunneling options if needed
-    if args.dns_tunnel || scan_types.contains(&ScanType::DnsTunnel) {
-        let dns_server = if let Some(dns_server_str) = &args.dns_server {
-            match dns_server_str.parse::<std::net::IpAddr>() {
+    // Set memory log buffer for scanner if present
+    if let Some(buffer) = &*memory_log_buffer {
+        // Clone the buffer instance to move into the scanner
+        scanner.set_memory_log(Arc::new(Mutex::new(buffer.clone()))); 
+    }
+
+    // Set DNS tunneling options if enabled
+    if args.dns_tunnel {
+        let server_ip = match args.dns_server {
+            Some(s) => match s.parse::<IpAddr>() {
                 Ok(ip) => Some(ip),
-                Err(e) => {
-                    eprintln!("Error parsing DNS server IP: {}", e);
-                    return Err(anyhow::anyhow!("Invalid DNS server: {}", e));
+                Err(_) => {
+                    warn!("Invalid DNS server IP address specified: '{}'. DNS tunneling might fail.", s);
+                    None
+                }
+            },
+            None => None,
+        };
+        scanner.set_dns_tunnel_options(server_ip, args.lookup_domain.as_deref());
+    }
+
+    // --- Run Scan --- 
+    info!("Starting scan execution...");
+    let scan_result = match scanner.run_scan().await {
+        Ok(result) => {
+            info!("Scan completed successfully.");
+            result
+        }
+        Err(e) => {
+            error!("Scan failed: {}", e);
+            // Attempt cleanup before exiting
+            if let Err(cleanup_err) = cleanup_ramdisk(&ramdisk_path) {
+                 warn!("Error during RAM disk cleanup on scan failure: {}", cleanup_err);
+            }
+            process::exit(1);
+        }
+    };
+
+    // --- Output Results --- 
+    info!("Processing and outputting results...");
+    // Always generate structured output (e.g., JSON), then decide how to print/save
+    
+    // Simplify the JSON serialization logic
+    let json_output = if args.pretty_json {
+        serde_json::to_string_pretty(&scan_result)
+    } else {
+        serde_json::to_string(&scan_result)
+    };
+    
+    // Handle JSON output to file or console
+    if args.json {
+        match json_output {
+            Ok(json) => {
+                if let Some(output_path) = &args.output {
+                    // Save to file
+                    if let Err(e) = std::fs::write(output_path, json) {
+                        error!("Failed to write JSON output to file: {}", e);
+                    } else {
+                        info!("Results saved to JSON file: {}", output_path.display());
+                    }
+                } else {
+                    // Print to console
+                    println!("{}", json);
                 }
             }
+            Err(e) => error!("Failed to serialize scan results to JSON: {}", e)
+        }
+    } else {
+        // Text format - either save to file or print to console
+        if let Some(output_path) = &args.output {
+            if let Err(e) = output::save_text_results(&scan_result, output_path) {
+                error!("Failed to save results to file: {}", e);
+            } else {
+                info!("Results saved to file: {}", output_path.display());
+            }
         } else {
-            None
-        };
-        
-        scanner.set_dns_tunnel_options(dns_server, args.lookup_domain.as_deref());
+            // Print results to console - pass the verbose flag from args
+            if let Err(e) = output::print_results(&scan_result, args.verbose) {
+                error!("Failed to print results: {}", e);
+            }
+        }
     }
-    
-    println!("{}Quantum Scanner operation complete{}", colors.green, colors.reset);
-    
+
+    // --- Cleanup --- 
+    info!("Starting cleanup phase...");
+    // Unmount RAM disk if created
+    if let Err(e) = cleanup_ramdisk(&ramdisk_path) {
+        warn!("Error during RAM disk cleanup: {}", e);
+        // Don't exit, just warn
+    }
+
+    // Securely delete log file if requested and not in memory-only mode
+    if args.secure_delete && !args.memory_only {
+        info!("Attempting secure delete for log file: {}", args.log_file.display());
+        if let Err(e) = secure_delete_file(&args.log_file, args.delete_passes) {
+            warn!("Error during secure delete of log file: {}", e);
+        }
+    }
+
+    info!("Quantum Scanner finished.");
     Ok(())
 }

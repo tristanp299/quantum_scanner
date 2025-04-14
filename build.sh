@@ -175,12 +175,11 @@ configure_tls_bypass() {
         # Make sure ~/.cargo directory exists
         mkdir -p ~/.cargo
         
-        # Create comprehensive cargo config to bypass cert checks
+        # Create cargo config to bypass cert checks (excluding cainfo)
         cat > ~/.cargo/config.toml << EOF
 [http]
 check-revoke = false
 ssl-version = "tlsv1.2"
-cainfo = ""
 multiplexing = false
 debug = false
 timeout = 60
@@ -199,11 +198,10 @@ EOF
         mkdir -p ~/.curl
         echo "insecure" > ~/.curlrc
         
-        # Set comprehensive environment variables for insecure SSL
+        # Set comprehensive environment variables for insecure SSL, ensuring they are exported
         export CARGO_HTTP_CHECK_REVOKE=false
         export CARGO_NET_GIT_FETCH_WITH_CLI=true
         export CARGO_HTTP_SSL_VERSION="tlsv1.2"
-        export CARGO_HTTP_CAINFO=""
         export CARGO_HTTP_MULTIPLEXING=false
         export RUSTUP_TLS_VERIFY_NONE=1
         export SSL_CERT_DIR=""
@@ -212,6 +210,7 @@ EOF
         export CURL_CA_BUNDLE=""
         export GIT_SSL_NO_VERIFY=true
         export NODE_TLS_REJECT_UNAUTHORIZED=0
+        export CARGO_HTTP_SSL_NO_VERIFY=true
         
         echo -e "${YELLOW}[!] TLS certificate verification has been disabled for this build${NC}"
     fi
@@ -581,23 +580,35 @@ build_project() {
         # Save the original Cargo.toml
         cp Cargo.toml Cargo.toml.bak
         
-        # Modify Cargo.toml to use minimal features and insecure-tls feature
-        echo -e "${BLUE}[*] Modifying Cargo.toml for insecure build...${NC}"
-        sed -i 's/default = \["full"\]/default = \["minimal-static", "insecure-tls"\]/' Cargo.toml
+        # Modify Cargo.toml to avoid x509-parser dependency
+        echo -e "${BLUE}[*] Modifying Cargo.toml to work around dependency issues...${NC}"
         
-        # Use RUSTFLAGS to specifically disable certificate verification
+        # Set default features to exclude x509-parser to avoid asn1-rs-derive proc-macro
+        sed -i 's/default = \["x509-parser"\]/default = \["insecure-tls"\]/' Cargo.toml
+                
+        # Configure TLS bypass environment variables
         echo -e "${BLUE}[*] Building with SSL verification disabled...${NC}"
-        RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" cargo build --release --no-default-features --features "minimal-static,insecure-tls"
+        
+        # Export environment variables for current shell session
+        export RUSTC_BOOTSTRAP=1
+        export CARGO_HTTP_CHECK_REVOKE=false
+        export CARGO_NET_GIT_FETCH_WITH_CLI=true
+        export CARGO_HTTP_SSL_VERSION="tlsv1.2"
+        export CARGO_HTTP_MULTIPLEXING=false
+        export RUSTUP_TLS_VERIFY_NONE=1
+        export SSL_CERT_DIR=""
+        export SSL_CERT_FILE=""
+        export REQUESTS_CA_BUNDLE=""
+        export CURL_CA_BUNDLE=""
+        export GIT_SSL_NO_VERIFY=true
+        export NODE_TLS_REJECT_UNAUTHORIZED=0
+        export CARGO_HTTP_SSL_NO_VERIFY=true
+        
+        # Build with default features and insecure-tls
+        cargo build --release
         BUILD_RESULT=$?
         
-        # If first attempt fails, try with additional flags
-        if [ $BUILD_RESULT -ne 0 ]; then
-            echo -e "${YELLOW}[!] First build attempt failed, trying with additional flags...${NC}"
-            RUSTC_BOOTSTRAP=1 RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" cargo build --release --no-default-features --features "minimal-static,insecure-tls"
-            BUILD_RESULT=$?
-        fi
-        
-        # Restore original Cargo.toml regardless of build result
+        # Restore original Cargo.toml regardless of result
         mv Cargo.toml.bak Cargo.toml
         
         if [ $BUILD_RESULT -eq 0 ]; then
@@ -624,26 +635,16 @@ build_project() {
             if echo "$BUILD_OUTPUT" | grep -q "SSL CA cert\|certificate verify\|SSL connection\|HTTPS protocol error"; then
                 echo -e "${YELLOW}[!] SSL certificate verification issue detected during build${NC}"
                 echo -e "${YELLOW}[!] Retrying build with SSL verification disabled...${NC}"
-                
+
                 # Enable SSL bypass and try again
                 BYPASS_TLS_SECURITY=true
                 configure_tls_bypass
-                
-                # Save the original Cargo.toml
-                cp Cargo.toml Cargo.toml.bak
-                
-                # Modify Cargo.toml for insecure build
-                echo -e "${BLUE}[*] Modifying Cargo.toml for insecure build...${NC}"
-                sed -i 's/default = \["full"\]/default = \["minimal-static", "insecure-tls"\]/' Cargo.toml
-                
-                # Build with SSL verification disabled
+
+                # Build with SSL verification disabled using default features
                 echo -e "${BLUE}[*] Building with SSL verification disabled...${NC}"
-                RUSTFLAGS="-C target-feature=+crt-static" SSL_CERT_FILE="" cargo build --release --no-default-features --features "minimal-static,insecure-tls"
+                cargo build --release
                 BUILD_RESULT=$?
-                
-                # Restore original Cargo.toml
-                mv Cargo.toml.bak Cargo.toml
-                
+
                 if [ $BUILD_RESULT -eq 0 ]; then
                     echo -e "${GREEN}[+] Build with SSL bypass completed successfully${NC}"
                     cp target/release/quantum_scanner ./quantum_scanner

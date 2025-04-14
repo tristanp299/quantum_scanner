@@ -20,24 +20,33 @@ panic = "unwind"  # Use unwinding for better error information
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.28", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
+
+# ML dependencies
+rustlearn = { version = "0.5.0", optional = true }
+ndarray = { version = "0.15.6", optional = true }
+bincode = { version = "1.3.3", optional = true }
+memmap2 = { version = "0.5.0", optional = true }
 
 # Network packet manipulation
-pnet = "0.33.0"
+pnet = "0.34"
 pnet_macros_support = "0.33.0"
-pnet_packet = "0.33.0"
+pnet_packet = "0.34"
 pnet_sys = "0.33.0"
+pnet_datalink = "0.34.0"
 socket2 = "0.5.3"
 
 # TLS/SSL support
-rustls = { version = "0.21.0", features = ["dangerous_configuration", "tls12"] }
-rustls-pemfile = "1.0.2"
-webpki-roots = "0.25.2"
-x509-parser = { version = "0.15.0", optional = true }
+rustls = "0.22"
+rustls-native-certs = "0.7"
+tokio-rustls = "0.25"
+webpki-roots = "0.26"
+x509-parser = "0.15.0"
+oid-registry = "0.6.1"  # Required for certificate parsing
 
 # Cryptography
-sha2 = { version = "0.10.6" }
-aes-gcm = { version = "0.10.2" }
+sha2 = "0.10"
+aes-gcm = "0.10"
 argon2 = { version = "0.5.0", optional = true }
 zeroize = { version = "1.6.0", optional = true }
 chacha20poly1305 = { version = "0.10.1", optional = true }
@@ -47,29 +56,30 @@ indicatif = "0.17.3"
 console = "0.15.5"
 dialoguer = "0.10.4"
 crossterm = "0.26.1"
-colored = "2.0.0"
+colored = "2.0"
 
 # File system and security
 tempfile = "3.5.0"
 # Need to enable these features for secure random and password generation
-rand = { version = "0.8.5", features = ["std", "std_rng"] }
+rand = "0.8"
 
 # String processing
 regex = "1.5.4"
 
 # Utility
-clap = { version = "4.2.7", features = ["derive"] }
-log = "0.4.17"
-env_logger = "0.10.0"
-chrono = { version = "0.4.24", features = ["serde", "clock"] }
-anyhow = "1.0.71"
-thiserror = "1.0.40"
+clap = { version = "4.4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+thiserror = "1.0"
 parking_lot = "0.12.1"
 libc = "0.2.139"
 
 # Serialization
-serde = { version = "1.0.163", features = ["derive"] }
-serde_json = "1.0.96"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+humantime-serde = "1.1"
 
 # Concurrency
 futures = "0.3.28"
@@ -80,13 +90,32 @@ hickory-resolver = { version = "0.24.0", features = ["dns-over-rustls", "system-
 ipnet = "2.7.2"
 cidr-utils = "0.5.10"
 
+# Networking & Packet Manipulation
+pnet_transport = "0.34"
+
+# Rate limiting
+governor = { version = "0.6", features = ["std"] }
+
+# Windows privilege check
+is_elevated = { version = "0.1.2", optional = true }
+
 [features]
-default = ["minimal-static", "insecure-tls"]
-full = ["x509-parser", "enhanced-crypto", "secure-memory"]
+default = []  # Disable ML by default until all issues are fixed
+# ML feature definitions
+ml = ["rustlearn", "ndarray", "bincode", "memmap2"]
+no-ml = []  # Explicitly disable ML functionality
+sample_collection = []
+model_training = []
+# Other features
+ndpi = []
+full = ["ml", "ndpi", "training_cli"]
+advanced-detection = []
 minimal-static = []
 secure-memory = ["zeroize"]
 enhanced-crypto = ["argon2", "chacha20poly1305"]
 insecure-tls = []
+webpki-roots = []
+training_cli = ["sample_collection", "model_training"]
 
 # Add a build.rs script to set up build environment
 [build-dependencies]
