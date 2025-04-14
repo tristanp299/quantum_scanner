@@ -40,14 +40,19 @@ use pnet::packet::icmpv6::{self/*, Icmpv6Types*/};
 // Removed unused commented out imports
 // Fragment-specific types might be nested or handled differently depending on pnet version
 // Check if FragmentPacket/MutableFragmentPacket exist directly under ipv6 or nested
-use pnet::packet::ipv6::{/*FragmentPacket,*/ MutableFragmentPacket}; // Assuming they exist directly for now
+use pnet::packet::ipv6::MutableFragmentPacket; // Fix: use correct path for MutableFragmentPacket
 // --- End pnet imports ---
 
 // Conditionally import x509-parser
 #[cfg(not(feature = "minimal-static"))]
-use x509_parser::prelude::*;
+// use x509_parser::prelude::*;
 #[cfg(not(feature = "minimal-static"))]
 use x509_parser::public_key::PublicKey;
+// Remove unused imports below
+// #[cfg(not(feature = "minimal-static"))]
+// use x509_parser::certificate::X509Certificate;
+// #[cfg(not(feature = "minimal-static"))]
+// use x509_parser::objects::oid_registry;
 
 use crate::models::{CertificateInfo, PortStatus};
 use crate::utils; // Use utils module directly for random_high_port and find_local_ipv4
@@ -725,32 +730,7 @@ fn parse_certificate(cert_der: &[u8]) -> Option<CertificateInfo> {
             hasher.update(cert_der);
             let fingerprint = format!("{:x}", hasher.finalize());
 
-            let alt_names = cert.extensions().iter()
-                .find(|ext| ext.oid == oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME)
-                .and_then(|ext| {
-                    // Extract alternative names without relying on the private parsed_extension() API
-                    // Instead we use the general_names API available in x509_parser
-                    if ext.value.is_empty() {
-                        return None;
-                    }
-                    // The subject_alternative_name method parses the extension value safely
-                    match x509_parser::extensions::GeneralNames::from_der(ext.value) {
-                        Ok((_, general_names)) => {
-                            Some(general_names.iter().map(|n| n.to_string()).collect())
-                        },
-                        Err(_) => None
-                    }
-                })
-                .unwrap_or_default();
-
-            let (public_key_bits, key_algorithm) = match cert.public_key().parsed() {
-                 Ok(PublicKey::RSA(rsa)) => (Some(rsa.key_size() as u16 * 8), Some("RSA".to_string())),
-                 Ok(PublicKey::EC(ec)) => (Some(ec.key_size() as u16), Some("ECC".to_string())), // key_size() for EC gives bits directly
-                 Ok(PublicKey::DSA(_)) => (None, Some("DSA".to_string())), // DSA key size is complex
-                 _ => (None, None), // Handle other key types or errors
-             };
-
-            Some(CertificateInfo {
+            let mut cert_info = CertificateInfo {
                 subject,
                 issuer,
                 not_before,
@@ -759,10 +739,52 @@ fn parse_certificate(cert_der: &[u8]) -> Option<CertificateInfo> {
                 signature_algorithm,
                 version,
                 fingerprint,
-                alt_names,
-                public_key_bits,
-                key_algorithm,
-            })
+                alt_names: Vec::new(),
+                public_key_bits: None,
+                key_algorithm: None,
+            };
+
+            // Parse extensions, especially subject alternative names
+            let extensions = cert.extensions();
+            for extension in extensions {
+                if extension.oid == oid_registry::OID_X509_EXT_SUBJECT_ALT_NAME {
+                    // Get the parsed extension directly - API seems to have changed
+                    let parsed_ext = extension.parsed_extension();
+                    if let x509_parser::extensions::ParsedExtension::SubjectAlternativeName(san) = parsed_ext {
+                        for name in san.general_names.iter() {
+                            // Add to alternate names based on type
+                            match name {
+                                x509_parser::extensions::GeneralName::DNSName(name) => {
+                                    cert_info.alt_names.push(String::from_utf8_lossy(name.as_bytes()).to_string());
+                                },
+                                x509_parser::extensions::GeneralName::IPAddress(ip) => {
+                                    if ip.len() == 4 {
+                                        // IPv4
+                                        cert_info.alt_names.push(format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]));
+                                    } else if ip.len() == 16 {
+                                        // IPv6 - simplified formatting
+                                        cert_info.alt_names.push(format!("{:02x}{:02x}:{:02x}{:02x}:...:{:02x}{:02x}", 
+                                            ip[0], ip[1], ip[2], ip[3], ip[14], ip[15]));
+                                    }
+                                },
+                                _ => {} // Ignore other SAN types
+                            }
+                        }
+                    }
+                }
+            }
+
+            let (public_key_bits, key_algorithm) = match cert.public_key().parsed() {
+                 Ok(PublicKey::RSA(rsa)) => (Some(rsa.key_size() as u16 * 8), Some("RSA".to_string())),
+                 Ok(PublicKey::EC(ec)) => (Some(ec.key_size() as u16), Some("ECC".to_string())), // key_size() for EC gives bits directly
+                 Ok(PublicKey::DSA(_)) => (None, Some("DSA".to_string())), // DSA key size is complex
+                 _ => (None, None), // Handle other key types or errors
+             };
+
+            cert_info.public_key_bits = public_key_bits;
+            cert_info.key_algorithm = key_algorithm;
+
+            Some(cert_info)
         },
         Err(e) => {
             debug!("Failed to parse certificate: {}", e);

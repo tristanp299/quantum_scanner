@@ -324,6 +324,17 @@ pub struct PortResult {
     /// This field is used to determine the overall status of the port for reporting.
     /// It prioritizes Open > OpenFiltered > other statuses.
     pub final_status: PortStatus,
+    
+    /// Detailed reason why this port has its current status. Provides context about
+    /// why a port was classified as open, closed, filtered, etc. Examples include
+    /// "SYN+ACK received", "RST received", "ICMP unreachable", "timeout".
+    /// This helps operators understand the underlying network behavior.
+    pub reason: Option<String>,
+    
+    /// Stores scan-specific reasons for each TCP scan type.
+    /// This allows displaying different reasons for different scan types,
+    /// providing more detailed and accurate information about responses for each technique.
+    pub tcp_reasons: HashMap<ScanType, String>,
 }
 
 impl Default for PortResult {
@@ -346,6 +357,8 @@ impl Default for PortResult {
             service_details: None,
             tls_protocol_version: None,
             final_status: PortStatus::Filtered, // Default to Filtered
+            reason: None, // Default to None
+            tcp_reasons: HashMap::new(),
         }
     }
 }
@@ -885,10 +898,15 @@ pub struct ScanResult {
     /// Timestamp when this specific port was scanned. Useful for correlating logs
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub scan_time: DateTime<Utc>,
+    /// Detailed reason for the port status (e.g., "SYN-ACK received", "RST received")
+    /// Provides technical explanation of why this port was classified with its status
+    pub reason: Option<String>,
+    /// Type of scan used for this result
+    pub scan_type: Option<ScanType>,
 }
 
 impl ScanResult {
-    /// Create a new ScanResult with the given port and status
+    /// Create a new ScanResult with basic information
     pub fn new(port: u16, status: PortStatus) -> Self {
         Self {
             port,
@@ -902,14 +920,16 @@ impl ScanResult {
             os_fingerprint: None,
             tls_protocol_version: None,
             scan_time: Utc::now(),
+            reason: None,
+            scan_type: None,
         }
     }
-
-    /// Create a new ScanResult with an error
+    
+    /// Create a new ScanResult for a port with an error
     pub fn new_with_error(port: u16, error: String) -> Self {
         Self {
             port,
-            status: PortStatus::Filtered, // Default to filtered for errors
+            status: PortStatus::Filtered,
             service_name: None,
             service_version: None,
             banner: None,
@@ -919,22 +939,29 @@ impl ScanResult {
             os_fingerprint: None,
             tls_protocol_version: None,
             scan_time: Utc::now(),
+            reason: Some("Scan error".to_string()),
+            scan_type: None,
         }
     }
-
-    /// Set the certificate info
+    
+    /// Set certificate info
     pub fn set_certificate_info(&mut self, cert_info: Option<CertificateInfo>) {
         self.certificate_info = cert_info;
     }
-
-    /// Set the filter reason
+    
+    /// Set filter reason
     pub fn set_filter_reason(&mut self, reason: Option<String>) {
         self.filter_reason = reason;
     }
-
-    /// Set the protocol version
+    
+    /// Set protocol version
     pub fn set_protocol_version(&mut self, version: Option<String>) {
         self.tls_protocol_version = version;
+    }
+    
+    /// Set reason for port status
+    pub fn set_reason(&mut self, reason: Option<String>) {
+        self.reason = reason;
     }
 }
 
@@ -981,4 +1008,61 @@ pub fn requires_raw_sockets(scan_types: &[ScanType]) -> bool {
         ScanType::Frag // Fragmentation likely needs raw sockets too
         // Tunneling might or might not depending on implementation
     ))
+}
+
+/// Metrics collected during scanning process
+/// Used to track scanner performance and activity
+#[derive(Debug, Clone)]
+pub struct ScanMetrics {
+    /// Total number of packets sent (estimates actual network traffic)
+    pub packets_sent: u64,
+    
+    /// Number of successful scan operations (connection attempts that completed)
+    pub successful_scans: u64,
+    
+    /// Number of ports found to be open
+    pub open_ports_found: u32,
+    
+    /// Number of ports found to be closed
+    pub closed_ports_found: u32,
+    
+    /// Number of ports found to be filtered
+    pub filtered_ports_found: u32,
+    
+    /// Time spent in milliseconds on scanning
+    pub scan_time_ms: u64,
+    
+    /// Time spent in milliseconds on port discovery
+    pub discovery_time_ms: u64,
+    
+    /// Time spent in milliseconds on service identification
+    pub service_id_time_ms: u64,
+}
+
+impl ScanMetrics {
+    /// Create a new metrics instance with zeroed counters
+    pub fn new() -> Self {
+        Self {
+            packets_sent: 0,
+            successful_scans: 0,
+            open_ports_found: 0,
+            closed_ports_found: 0,
+            filtered_ports_found: 0,
+            scan_time_ms: 0,
+            discovery_time_ms: 0,
+            service_id_time_ms: 0,
+        }
+    }
+    
+    /// Reset all counters to zero
+    pub fn reset(&mut self) {
+        self.packets_sent = 0;
+        self.successful_scans = 0;
+        self.open_ports_found = 0;
+        self.closed_ports_found = 0;
+        self.filtered_ports_found = 0;
+        self.scan_time_ms = 0;
+        self.discovery_time_ms = 0;
+        self.service_id_time_ms = 0;
+    }
 } 

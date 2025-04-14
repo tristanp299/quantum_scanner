@@ -7,6 +7,7 @@ use chrono::Utc;
 use console::{style, Term};
 use serde_json;
 
+use crate::ScanType;
 use crate::models::{PortResult, PortStatus, ScanResults};
 use crate::utils::sanitize_string;
 
@@ -159,13 +160,32 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
             // States by scan type
             if !port_result.tcp_states.is_empty() {
                 output.push_str("TCP States:\n");
-                for (scan_type, status) in &port_result.tcp_states {
-                    output.push_str(&format!("  - {} scan: {}\n", scan_type, status));
+                // Sort scan types alphabetically
+                let mut scan_types: Vec<(&ScanType, &PortStatus)> = port_result.tcp_states.iter().collect();
+                scan_types.sort_by(|a, b| a.0.cmp(b.0));
+                
+                for (scan_type, status) in scan_types {
+                    // Get reason for this specific scan type if available from tcp_reasons
+                    let status_reason = if let Some(reason) = port_result.tcp_reasons.get(scan_type) {
+                        format!(" (Reason: {})", reason)
+                    } else if let Some(reason) = &port_result.reason {
+                        // Fall back to the general reason if no specific reason exists
+                        format!(" (Reason: {})", reason)
+                    } else {
+                        String::new()
+                    };
+                    
+                    output.push_str(&format!("  - {} scan: {}{}\n", scan_type, status, status_reason));
                 }
             }
             
             if let Some(udp_state) = &port_result.udp_state {
                 output.push_str(&format!("UDP State: {}\n", udp_state));
+            }
+            
+            // Add reason if available
+            if let Some(reason) = &port_result.reason {
+                output.push_str(&format!("Status Reason: {}\n", reason));
             }
             
             // Enhanced security posture assessment
@@ -275,14 +295,33 @@ fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<(
     // Scan results for each technique
     if !result.tcp_states.is_empty() {
         file.write_all(b"\nTCP Scan Results:\n")?;
-        for (scan_type, status) in &result.tcp_states {
-            writeln!(file, "- {}: {}", scan_type, status)?;
+        // Sort scan types alphabetically
+        let mut scan_types: Vec<(&ScanType, &PortStatus)> = result.tcp_states.iter().collect();
+        scan_types.sort_by(|a, b| a.0.cmp(b.0));
+        
+        for (scan_type, status) in scan_types {
+            // Get reason for this specific scan type if available from tcp_reasons
+            let status_reason = if let Some(reason) = result.tcp_reasons.get(scan_type) {
+                format!(" (Reason: {})", reason)
+            } else if let Some(reason) = &result.reason {
+                // Fall back to the general reason if no specific reason exists
+                format!(" (Reason: {})", reason)
+            } else {
+                String::new()
+            };
+            
+            writeln!(file, "- {}: {}{}", scan_type, status, status_reason)?;
         }
     }
     
     // UDP result if available
     if let Some(udp_status) = &result.udp_state {
         writeln!(file, "\nUDP: {}", udp_status)?;
+    }
+    
+    // Reason for port status if available
+    if let Some(reason) = &result.reason {
+        writeln!(file, "\nStatus Reason: {}", reason)?;
     }
     
     // Firewall filtering
@@ -482,13 +521,32 @@ fn print_detailed_results(results: &ScanResults) -> Result<()> {
             // Print service fingerprinting information
             if !result.tcp_states.is_empty() {
                 println!("  Scan Results:");
-                for (scan_type, status) in &result.tcp_states {
-                    println!("    - {} scan: {}", scan_type, status);
+                // Sort scan types alphabetically
+                let mut scan_types: Vec<(&ScanType, &PortStatus)> = result.tcp_states.iter().collect();
+                scan_types.sort_by(|a, b| a.0.cmp(b.0));
+                
+                for (scan_type, status) in scan_types {
+                    // Get reason for this specific scan type if available from tcp_reasons
+                    let status_reason = if let Some(reason) = result.tcp_reasons.get(scan_type) {
+                        format!(" (Reason: {})", reason)
+                    } else if let Some(reason) = &result.reason {
+                        // Fall back to the general reason if no specific reason exists
+                        format!(" (Reason: {})", reason)
+                    } else {
+                        String::new()
+                    };
+                    
+                    println!("    - {} scan: {}{}", scan_type, status, style(&status_reason).yellow());
                 }
             }
             
             if let Some(udp_state) = &result.udp_state {
                 println!("  UDP: {}", udp_state);
+            }
+            
+            // Print reason if available
+            if let Some(reason) = &result.reason {
+                println!("  Status Reason: {}", style(reason).yellow());
             }
             
             // Print filtering information
@@ -663,9 +721,15 @@ pub fn print_open_ports(results: &ScanResults, verbose: bool) -> Result<()> {
                 None => "unknown",
             };
             
-            println!("{:<5} {}", 
+            let reason_text = match &result.reason {
+                Some(r) => format!(" (Reason: {})", r),
+                None => String::new(),
+            };
+            
+            println!("{:<5} {}{}", 
                 style(port).yellow().bold(), 
-                service
+                service,
+                if verbose { reason_text } else { String::new() }
             );
         }
     }
@@ -697,12 +761,32 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
         // Determine state
         let mut states = Vec::new();
         
-        for (scan_type, status) in &port_result.tcp_states {
-            states.push(format!("{} scan: {}", scan_type, style(status).green()));
+        // Sort scan types alphabetically
+        let mut scan_types: Vec<(&ScanType, &PortStatus)> = port_result.tcp_states.iter().collect();
+        scan_types.sort_by(|a, b| a.0.cmp(b.0));
+        
+        for (scan_type, status) in scan_types {
+            // Get reason for this specific scan type if available from tcp_reasons
+            let status_reason = if let Some(reason) = port_result.tcp_reasons.get(scan_type) {
+                format!(" (Reason: {})", reason)
+            } else if let Some(reason) = &port_result.reason {
+                // Fall back to the general reason if no specific reason exists
+                format!(" (Reason: {})", reason)
+            } else {
+                String::new()
+            };
+            
+            states.push(format!("{} scan: {}{}", scan_type, style(status).green(), style(&status_reason).yellow()));
         }
         
         if let Some(udp_state) = &port_result.udp_state {
-            states.push(format!("UDP: {}", style(udp_state).green()));
+            // Get reason for UDP if available
+            let status_reason = if let Some(reason) = &port_result.reason {
+                format!(" (Reason: {})", reason)
+            } else {
+                String::new()
+            };
+            states.push(format!("UDP: {}{}", style(udp_state).green(), style(&status_reason).yellow()));
         }
         
         if !states.is_empty() {
@@ -710,6 +794,11 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
             for state in states {
                 println!("  - {}", state);
             }
+        }
+        
+        // Print reason if available
+        if let Some(reason) = &port_result.reason {
+            println!("Status Reason: {}", style(reason).yellow());
         }
         
         // Only show detailed information in verbose mode
@@ -748,36 +837,12 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
                     println!("  Description: {}", vuln.description);
                 }
             }
-            
-            // Anomalies if detected
-            if !port_result.anomalies.is_empty() {
-                println!("\n{}", style("Detected Anomalies:").underlined());
-                for anomaly in &port_result.anomalies {
-                    println!("- {}", anomaly);
-                }
-            }
-            
-            // Security posture if available
-            if let Some(posture) = &port_result.security_posture {
-                println!("\n{}", style("Security Assessment:").underlined());
-                for item in posture.split(';') {
-                    println!("- {}", item.trim());
-                }
-            }
-            
-            // Extended service details if available
-            if let Some(details) = &port_result.service_details {
-                println!("\n{}", style("Service Details:").underlined());
-                for (key, value) in details {
-                    println!("{}: {}", key, value);
-                }
-            }
         }
-        
-        Ok(())
     } else {
-        Err(anyhow::anyhow!("Port {} not found in scan results", port))
+        println!("No information available for port {}", port);
     }
+    
+    Ok(())
 }
 
 /// Sanitize a banner string for safe display
@@ -802,38 +867,38 @@ fn sanitize_banner(banner: &str) -> String {
 
 #[allow(dead_code)]
 pub fn export_to_csv(results: &ScanResults, writer: &mut dyn Write) -> Result<()> {
-    // Write CSV header
-    writeln!(writer, "port,state,service,version,banner")?;
+    // Write the header row
+    writeln!(writer, "port,status,service,version,reason,banner")?;
     
-    // Sort ports for consistent output
+    // Write each port result
     let mut ports: Vec<u16> = results.results.keys().copied().collect();
     ports.sort_unstable();
     
     for port in ports {
-        if let Some(result) = results.results.get(&port) {
-            // Find the most open state
-            let state = if result.tcp_states.values().any(|s| *s == PortStatus::Open) {
-                "open"
-            } else if result.udp_state == Some(PortStatus::Open) {
-                "open/udp"
-            } else if result.tcp_states.values().any(|s| *s == PortStatus::OpenFiltered) {
-                "open|filtered"
-            } else if !result.tcp_states.is_empty() {
-                "closed"
-            } else {
-                "unknown"
+        if let Some(port_result) = results.results.get(&port) {
+            // Determine the overall port status
+            let status = match port_result.final_status {
+                PortStatus::Open => "open",
+                PortStatus::Closed => "closed", 
+                PortStatus::Filtered => "filtered",
+                PortStatus::Unfiltered => "unfiltered",
+                PortStatus::OpenFiltered => "open|filtered",
             };
             
-            let service = result.service.as_deref().unwrap_or("").replace(",", "");
-            let version = result.version.as_deref().unwrap_or("").replace(",", "");
+            // Get basic port information
+            let service = port_result.service.as_deref().unwrap_or("").replace(",", "");
+            let version = port_result.version.as_deref().unwrap_or("").replace(",", "");
+            let reason = port_result.reason.as_deref().unwrap_or("").replace(",", "");
             
-            // Take first line of banner and escape quotes, commas
-            let banner = match &result.banner {
-                Some(b) => b.lines().next().unwrap_or("").replace("\"", "\"\"").replace(",", "\\,"),
+            // Get banner, limiting to first line
+            let banner = match &port_result.banner {
+                Some(b) => b.lines().next().unwrap_or("").replace(",", "").replace("\"", "'"),
                 None => String::new(),
             };
             
-            writeln!(writer, "{},{},{},{},\"{}\"", port, state, service, version, banner)?;
+            // Write the CSV row
+            writeln!(writer, "{},{},{},{},{},\"{}\"", 
+                port, status, service, version, reason, banner)?;
         }
     }
     

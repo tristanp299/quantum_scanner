@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr/*, Ipv6Addr, SocketAddr*/};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 // use std::fs::File;
 // Use comment style
 // use std::io::Write;
@@ -15,15 +15,13 @@ use tokio::task::JoinHandle;
 use futures::future::join_all;
 // use rand::Rng;
 
-use crate::models::{PortResult, ScanResults, ScanType, PortStatus, /*CertificateInfo, HttpInfo,*/ VulnInfo, ScanResult, requires_raw_sockets};
+use crate::models::{PortResult, ScanResults, ScanType, PortStatus, /*CertificateInfo, HttpInfo,*/ VulnInfo, ScanResult, requires_raw_sockets, MimicPayloads, ScanMetrics};
 use crate::utils::{MemoryLogBuffer, sanitize_string};
 use crate::techniques;
 use crate::banner;
 use crate::http_analyzer;
-use crate::ml_service_ident;
 use crate::service_fingerprints::ServiceFingerprints;
 use crate::minimal;
-
 
 // --- Rate Limiting Imports ---
 use governor::{Quota, RateLimiter, state::direct::NotKeyed, clock::DefaultClock};
@@ -97,6 +95,10 @@ pub struct QuantumScanner {
     dns_tunnel_server: Option<IpAddr>,
     /// DNS Tunneling: Custom lookup domain
     dns_tunnel_domain: Option<String>,
+    /// Metrics for scan performance and statistics collection
+    metrics: Option<Arc<Mutex<ScanMetrics>>>,
+    /// Results map to store scan results by port
+    results_map: HashMap<u16, PortResult>,
     // TODO: Add state for rate limiting if max_rate > 0 - Implemented basic delay
 }
 
@@ -302,6 +304,8 @@ impl QuantumScanner {
             ml_identification,
             dns_tunnel_server: None,
             dns_tunnel_domain: None,
+            metrics: None,
+            results_map: HashMap::new(),
         })
     }
     
@@ -408,15 +412,15 @@ impl QuantumScanner {
             }
         }
 
-        // Core variable setup
-        let metrics = Arc::new(Mutex::new(metrics));
-        let open_ports_set = Arc::new(Mutex::new(HashSet::new()));
-        let results_map = Arc::new(Mutex::new(HashMap::new()));
+        // Initialize metrics if not already initialized
+        if self.metrics.is_none() {
+            self.metrics = Some(Arc::new(Mutex::new(ScanMetrics::new())));
+        }
         
         // Create service identification components
         // Use MinimalServiceIdentifier when the ml feature is disabled
         #[cfg(feature = "ml")]
-        let ml_identifier = Arc::new(ml_service_ident::MlServiceIdentifier::default());
+        let ml_identifier = Arc::new(minimal::MinimalServiceIdentifier::new());
         #[cfg(not(feature = "ml"))]
         let ml_identifier = Arc::new(minimal::MinimalServiceIdentifier::new());
         
@@ -496,7 +500,9 @@ impl QuantumScanner {
 
                     // Lock the results map once for this port's analysis
                     let mut map_guard = results_map_clone.lock().await;
-                    if let Some(result_entry) = map_guard.get_mut(&port) {
+                    if let Some(port_result) = map_guard.get_mut(&port) {
+                        // Explicitly type port_result for clarity
+                        let result_entry: &mut PortResult = port_result;
                         result_entry.banner = banner_text.clone(); // Store the banner
                         
                         // If banner grabbing was successful, that's a definitive sign that the port is open
@@ -543,10 +549,8 @@ impl QuantumScanner {
                         // Priority 3: Use ML identification if enabled and service is unknown/ambiguous
                         if ml_identification_clone && (identified_service.is_none() || identified_service.as_deref() == Some("unknown")) {
                             if let Some(ref banner_content) = result_entry.banner {
-                                // Call the correct identification method
-                                // NOTE: Using placeholder values for response_time_ms (0.0), immediate_close (false),
-                                // and server_initiated (true) as they are not readily available here.
-                                // Accuracy might be affected.
+                                // Call the correct identification method based on feature flag
+                                #[cfg(feature = "ml")]
                                 if let Some((ml_service, ml_version)) = ml_identifier_clone.as_ref().identify_service(
                                     banner_content.as_str(),
                                     port,
@@ -562,6 +566,24 @@ impl QuantumScanner {
                                             crate::utils::extract_version_from_banner(service_name, banner_content.as_str())
                                         })
                                     });
+                                }
+
+                                // Fallback version without ML feature flag
+                                #[cfg(not(feature = "ml"))]
+                                {
+                                    // Create the bytes explicitly to help with type inference
+                                    let content_bytes: &[u8] = banner_content.as_bytes();
+                                    if let Some((ml_service, ml_version)) = ml_identifier_clone.as_ref().identify_service(
+                                        content_bytes,
+                                        port,
+                                        0.0,  // response_time_ms (placeholder)
+                                        false, // immediate_close (placeholder)
+                                        true  // server_initiated (placeholder)
+                                    ) {
+                                        debug!("Minimal service identification for port {}: {} (Version: {:?})", port, ml_service, ml_version);
+                                        identified_service = Some(ml_service); // ml_service is already String
+                                        identified_version = ml_version;
+                                    }
                                 }
                             }
                         }
@@ -752,273 +774,405 @@ impl QuantumScanner {
         ttl_jitter: u8,
         mimic_protocol: String,
         protocol_variant: Option<String>,
-        ml_identification: bool,
+        _ml_identification: bool,
     ) -> Vec<JoinHandle<()>> {
-        let mut tasks = Vec::new();
+        let mut tasks = Vec::with_capacity(ports.len());
         
+        // Apply rate limiting delay if configured
+        let rate_limiter = self.rate_limiter.clone(); 
+        
+        // Process each port
         for &port in ports {
-            // Rate limiting if configured
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.until_ready().await;
-            }
-            
-            // Clone necessary data for the asynchronous task.
-            // Arcs are cloned cheaply (incrementing reference count).
-            let target_ip_clone = target_ip;
-            let use_ipv6_clone = use_ipv6;
-            let _evasion_clone = evasion || enhanced_evasion;
-            let local_ip_clone = local_ip_v4.map(IpAddr::V4);
-            let semaphore_clone = Arc::clone(&semaphore);
-            let results_map_clone = Arc::clone(&results_map);
-            let open_ports_set_clone = Arc::clone(&open_ports_set);
-            let packets_sent_clone = Arc::clone(&packets_sent);
-            let successful_scans_clone = Arc::clone(&successful_scans);
-            let mimic_protocol_clone = mimic_protocol.clone();
-            let timeout_clone = timeout_scan;
-            let enhanced_evasion_clone = enhanced_evasion;
-            let mimic_os_clone = mimic_os.clone();
-            let ttl_jitter_clone = ttl_jitter;
-            let protocol_variant_clone = protocol_variant.clone();
-            let log_buffer_clone = memory_log.clone();
-            let _ml_ident_clone = ml_identification;
-            let scan_type_clone = scan_type;
-            let dns_tunnel_domain = self.dns_tunnel_domain.clone();
-            let dns_tunnel_server = self.dns_tunnel_server;
+            // Clone Arc references for task closure
+            let semaphore_clone = semaphore.clone();
+            let results_map_clone = results_map.clone();
+            let open_ports_set_clone = open_ports_set.clone();
+            let packets_sent_clone = packets_sent.clone();
+            let successful_scans_clone = successful_scans.clone();
             let debug_mode_clone = debug_mode;
+            let memory_log_clone = memory_log.clone();
             
-            // Move this independent task outside of self
+            // Convert IpAddr to IpAddr
+            let local_ip = local_ip_v4.map(IpAddr::V4);
+            
+            // Clone strings for use in task
+            let mimic_os_clone = mimic_os.clone();
+            let mimic_protocol_clone = mimic_protocol.clone();
+            let _protocol_variant_clone = protocol_variant.clone();
+            let scan_type_clone = scan_type;
+            
+            // For rate limiting inside the task
+            let rate_limiter_clone = rate_limiter.clone();
+            
+            // Spawn a new async task for this port
             let task = tokio::spawn(async move {
-                // Acquire a permit from the semaphore to limit concurrency.
-                debug!("[{:?}] Waiting for permit for port {}", scan_type_clone, port);
-                let permit = match semaphore_clone.acquire().await {
-                    Ok(p) => p,
-                    Err(_) => {
-                        error!("Failed to acquire semaphore permit for port {}. Scan may be incomplete.", port);
-                        return; // Return void instead of a tuple
+                // Wait until we can acquire a permit from the semaphore
+                let _permit = match semaphore_clone.acquire().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        error!("Failed to acquire semaphore permit: {}", e);
+                        return;
                     }
                 };
-                debug!("[{:?}] Acquired permit for port {}", scan_type_clone, port);
-
-                let scan_start_time = Instant::now();
-
-                let result = match scan_type_clone {
-                    ScanType::Syn => {
-                        match techniques::syn_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            use_ipv6_clone,
-                            timeout_clone,
-                            enhanced_evasion_clone,
-                            &mimic_os_clone,
-                            ttl_jitter_clone,
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::Ssl => {
-                        match techniques::ssl_scan(
-                            target_ip_clone,
-                            port,
-                            timeout_clone,
-                        ).await {
-                            Ok((status, cert_info, version)) => {
-                                let mut scan_result = ScanResult::new(port, status);
-                                scan_result.set_certificate_info(cert_info);
-                                scan_result.set_protocol_version(Some(version));
-                                Ok(scan_result)
-                            }
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::Udp => {
-                         match techniques::udp_scan(
-                             target_ip_clone,
-                             port,
-                             local_ip_clone,
-                             use_ipv6_clone,
-                             timeout_clone,
-                         ).await {
-                             Ok(status) => Ok(ScanResult::new(port, status)),
-                             Err(e) => Err(e),
-                         }
-                    },
-                    ScanType::Ack => {
-                        match techniques::ack_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            use_ipv6_clone,
-                            timeout_clone,
-                            enhanced_evasion_clone,
-                            &mimic_os_clone,
-                            ttl_jitter_clone,
-                        ).await {
-                            Ok((status, filter_reason)) => {
-                                let mut scan_result = ScanResult::new(port, status);
-                                scan_result.set_filter_reason(Some(filter_reason));
-                                Ok(scan_result)
-                            }
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::Fin => {
-                         match techniques::fin_scan(
-                             target_ip_clone,
-                             port,
-                             local_ip_clone,
-                             use_ipv6_clone,
-                             timeout_clone,
-                             enhanced_evasion_clone,
-                             &mimic_os_clone,
-                             ttl_jitter_clone,
-                         ).await {
-                             Ok(status) => Ok(ScanResult::new(port, status)),
-                             Err(e) => Err(e),
-                         }
-                    },
-                    ScanType::Xmas => {
-                        match techniques::xmas_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            use_ipv6_clone,
-                            timeout_clone,
-                            enhanced_evasion_clone,
-                            &mimic_os_clone,
-                            ttl_jitter_clone,
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::Null => {
-                        match techniques::null_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            use_ipv6_clone,
-                            timeout_clone,
-                            enhanced_evasion_clone,
-                            &mimic_os_clone,
-                            ttl_jitter_clone,
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::Window => {
-                        match techniques::window_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            use_ipv6_clone,
-                            timeout_clone,
-                            enhanced_evasion_clone,
-                            &mimic_os_clone,
-                            ttl_jitter_clone,
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::TlsEcho => {
-                        // Assuming tls_echo_scan doesn't need enhanced evasion parameters
-                         match techniques::tls_echo_scan(
-                             target_ip_clone,
-                             port,
-                             local_ip_clone,
-                             use_ipv6_clone,
-                             enhanced_evasion_clone,
-                             timeout_clone,
-                         ).await {
-                             Ok(status) => Ok(ScanResult::new(port, status)),
-                             Err(e) => Err(e),
-                         }
-                    },
-                    ScanType::Mimic => {
-                        // Process payload customization options and generate payload
-                        let payload = crate::utils::generate_advanced_mimicry(&mimic_protocol_clone, protocol_variant_clone.as_deref());
-                        match techniques::mimic_scan_with_payload(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            use_ipv6_clone,
-                            enhanced_evasion_clone,
-                            &mimic_protocol_clone,
-                            payload,
-                            timeout_clone,
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::Frag => {
-                         match techniques::frag_scan(
-                             target_ip_clone,
-                             port,
-                             local_ip_clone,
-                             use_ipv6_clone,
-                             timeout_clone,
-                             enhanced_evasion_clone,
-                             &mimic_os_clone,
-                             ttl_jitter_clone,
-                         ).await {
-                             Ok(status) => Ok(ScanResult::new(port, status)),
-                             Err(e) => Err(e),
-                         }
-                    },
-                    ScanType::DnsTunnel => {
-                        // Use the DNS tunnel implementation
-                        let dns_tunnel_domain_ref = dns_tunnel_domain.as_deref();
-                        
-                        match crate::tunnel::tunnel_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            crate::tunnel::TunnelType::Dns,
-                            timeout_clone,
-                            dns_tunnel_domain_ref,
-                            dns_tunnel_server,
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    ScanType::IcmpTunnel => {
-                        // Use the ICMP tunnel implementation
-                        match crate::tunnel::tunnel_scan(
-                            target_ip_clone,
-                            port,
-                            local_ip_clone,
-                            crate::tunnel::TunnelType::Icmp,
-                            timeout_clone,
-                            None,  // lookup_domain not needed for ICMP
-                            None,  // dns_server not needed for ICMP
-                        ).await {
-                            Ok(status) => Ok(ScanResult::new(port, status)),
-                            Err(e) => Err(e),
-                        }
-                    },
-                    // Add other scan types as needed
-                };
-
-                let duration = scan_start_time.elapsed();
-                debug!("[{:?}] Scan for port {} completed in {:?}", scan_type_clone, port, duration);
-
-                // Log the result to the memory buffer if available
-                if let Some(buffer_arc) = &log_buffer_clone {
-                    // Lock the mutex to get a mutable reference to the MemoryLogBuffer
-                    let buffer = buffer_arc.lock().await;
-                    // No need for an additional if-let since the Option is already unwrapped
-                    match &result {
-                        Ok(scan_res) => buffer.log("INFO", &format!("Scan result for {}:{}: {:?}", target_ip_clone, port, scan_res.status)),
-                        Err(e) => buffer.log("ERROR", &format!("Scan error for {}:{}: {}", target_ip_clone, port, e)),
+                
+                // Apply rate limiting if configured
+                if let Some(limiter) = rate_limiter_clone {
+                    if let Err(_wait_time) = limiter.check() {
+                        // If rate limit reached, sleep for the required time
+                        // Convert wait_time to standard Duration and sleep
+                        let sleep_time = std::time::Duration::from_millis(10); // Default sleep time
+                        tokio::time::sleep(sleep_time).await;
                     }
                 }
-
-                // Process the result and update the results map
+                
+                // Increment packets sent counter
+                {
+                    let mut counter = packets_sent_clone.lock().await;
+                    *counter += 1;
+                }
+                
+                // Perform the specific scan type
+                let result = match scan_type_clone {
+                    ScanType::Syn => {
+                        techniques::syn_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|status| {
+                            // Create a reason string based on status for SYN scan
+                            let reason = match status {
+                                PortStatus::Open => Some("SYN-ACK received".to_string()),
+                                PortStatus::Closed => Some("RST received".to_string()),
+                                PortStatus::Filtered => Some("No response/ICMP unreachable".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Syn);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Ssl => {
+                        techniques::ssl_scan(
+                            target_ip,
+                            port,
+                            timeout_scan
+                        ).await.map(|(status, cert_info, protocol)| {
+                            // Create reason for SSL scan
+                            let reason = match status {
+                                PortStatus::Open => Some(format!("TLS handshake successful ({})", protocol)),
+                                PortStatus::Closed => Some("Connection refused".to_string()),
+                                PortStatus::Filtered => Some("Connection timeout".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_certificate_info(cert_info);
+                            result.set_protocol_version(Some(protocol));
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Ssl);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Udp => {
+                        techniques::udp_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan
+                        ).await.map(|status| {
+                            // Create reason for UDP scan
+                            let reason = match status {
+                                PortStatus::Open => Some("UDP response received".to_string()),
+                                PortStatus::Closed => Some("ICMP port unreachable".to_string()),
+                                PortStatus::OpenFiltered => Some("No response (timeout)".to_string()),
+                                PortStatus::Filtered => Some("Other ICMP error".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Udp);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Ack => {
+                        techniques::ack_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|(status, filter_reason)| {
+                            let mut result = ScanResult::new(port, status);
+                            result.set_filter_reason(Some(filter_reason.clone()));
+                            
+                            // Use filter_reason directly as reason
+                            result.set_reason(Some(filter_reason.clone()));
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Ack);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Fin => {
+                        techniques::fin_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|status| {
+                            // Create reason for FIN scan
+                            let reason = match status {
+                                PortStatus::Closed => Some("RST received".to_string()),
+                                PortStatus::OpenFiltered => Some("No response".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Fin);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Xmas => {
+                        techniques::xmas_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|status| {
+                            // Create reason for XMAS scan
+                            let reason = match status {
+                                PortStatus::Closed => Some("RST received".to_string()),
+                                PortStatus::OpenFiltered => Some("No response".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Xmas);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Null => {
+                        techniques::null_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|status| {
+                            // Create reason for NULL scan
+                            let reason = match status {
+                                PortStatus::Closed => Some("RST received".to_string()),
+                                PortStatus::OpenFiltered => Some("No response".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Null);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Window => {
+                        techniques::window_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|status| {
+                            // Create reason for Window scan
+                            let reason = match status {
+                                PortStatus::Open => Some("RST with non-zero window size".to_string()),
+                                PortStatus::Closed => Some("RST with zero window size".to_string()),
+                                PortStatus::Filtered => Some("No response/ICMP unreachable".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Window);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Frag => {
+                        techniques::frag_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            timeout_scan,
+                            enhanced_evasion,
+                            &mimic_os_clone,
+                            ttl_jitter
+                        ).await.map(|status| {
+                            // Create reason for fragmented scan
+                            let reason = match status {
+                                PortStatus::Open => Some("SYN-ACK received (fragmented)".to_string()),
+                                PortStatus::Closed => Some("RST received (fragmented)".to_string()),
+                                PortStatus::Filtered => Some("No response/ICMP unreachable (fragmented)".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Frag);
+                            
+                            result
+                        })
+                    },
+                    ScanType::TlsEcho => {
+                        let _payload: Vec<u8> = vec![]; // Empty payload in this case
+                        techniques::tls_echo_scan(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            evasion,
+                            timeout_scan
+                        ).await.map(|status| {
+                            // Create reason for TLS echo scan
+                            let reason = match status {
+                                PortStatus::Open => Some("TLS echo response received".to_string()),
+                                PortStatus::Closed => Some("Connection refused".to_string()),
+                                PortStatus::Filtered => Some("No response (timeout)".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::TlsEcho);
+                            
+                            result
+                        })
+                    },
+                    ScanType::Mimic => {
+                        let payload_bytes = MimicPayloads::get(&mimic_protocol_clone);
+                        techniques::mimic_scan_with_payload(
+                            target_ip,
+                            port,
+                            local_ip,
+                            use_ipv6,
+                            evasion,
+                            &mimic_protocol_clone,
+                            payload_bytes.to_vec(),
+                            timeout_scan
+                        ).await.map(|status| {
+                            // Create reason for mimic scan
+                            let reason = match status {
+                                PortStatus::Open => Some(format!("Response to {} mimic payload", mimic_protocol_clone)),
+                                PortStatus::Closed => Some("Connection refused".to_string()),
+                                PortStatus::Filtered => Some("No response (timeout)".to_string()),
+                                _ => None
+                            };
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::Mimic);
+                            
+                            result
+                        })
+                    },
+                    ScanType::DnsTunnel => {
+                        minimal::dummy_scan(
+                            target_ip,
+                            port,
+                            scan_type_clone
+                        ).await.map(|status| {
+                            // Create reason for DNS tunnel scan
+                            let reason = Some("DNS tunnel probe".to_string());
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::DnsTunnel);
+                            
+                            result
+                        })
+                    },
+                    ScanType::IcmpTunnel => {
+                        minimal::dummy_scan(
+                            target_ip,
+                            port,
+                            scan_type_clone
+                        ).await.map(|status| {
+                            // Create reason for ICMP tunnel scan
+                            let reason = Some("ICMP tunnel probe".to_string());
+                            
+                            let mut result = ScanResult::new(port, status);
+                            result.set_reason(reason.clone());
+                            
+                            // For converting to PortResult later
+                            result.scan_type = Some(ScanType::IcmpTunnel);
+                            
+                            result
+                        })
+                    },
+                };
+                
+                // Log to memory buffer if enabled
+                if let Some(memory_log_ref) = &memory_log_clone {
+                    let log = memory_log_ref.lock().await;
+                    log.log("INFO", &format!("Scanned port {} with {} scan: {:?}", port, scan_type_clone, result));
+                }
+                
+                // Process the scan result
                 if let Ok(scan_result) = &result {
                     let mut results_guard = results_map_clone.lock().await;
                     
@@ -1058,6 +1212,19 @@ impl QuantumScanner {
                         port_result.filtering = Some(filter_reason.clone());
                     }
                     
+                    // Copy the reason from scan_result to port_result if it exists
+                    if let Some(reason) = &scan_result.reason {
+                        // Update the reason only if one doesn't exist or this is a more specific status
+                        if port_result.reason.is_none() || scan_result.status == PortStatus::Open {
+                            port_result.reason = Some(format!("{} ({})", reason, scan_type_clone));
+                        }
+                        
+                        // Also store the reason in the tcp_reasons HashMap if scan_type is present
+                        if let Some(scan_type) = scan_result.scan_type {
+                            port_result.tcp_reasons.insert(scan_type, reason.clone());
+                        }
+                    }
+                    
                     // If the port is found to be open or open|filtered, add it to the open ports set
                     match scan_result.status {
                         PortStatus::Open => {
@@ -1090,21 +1257,46 @@ impl QuantumScanner {
                     // Increment the successful scans counter
                     let mut counter = successful_scans_clone.lock().await;
                     *counter += 1;
-                } else if let Err(e) = &result {
-                    debug!("Scan for port {} failed: {}", port, e);
                 }
-                
-                // Increment the packets sent counter regardless of result
-                let mut counter = packets_sent_clone.lock().await;
-                *counter += 1;
-
-                // Decrement the semaphore permit count when the task is done
-                drop(permit);
+                else if let Err(e) = &result {
+                    error!("Error scanning port {} with {}: {}", port, scan_type_clone, e);
+                    
+                    // Even in case of error, we want to record something
+                    let mut results_guard = results_map_clone.lock().await;
+                    let port_result = results_guard.entry(port).or_insert_with(PortResult::default);
+                    
+                    // Assume filtered in case of scan error but don't change any existing determinations
+                    if !port_result.tcp_states.contains_key(&scan_type_clone) {
+                        port_result.tcp_states.insert(scan_type_clone, PortStatus::Filtered);
+                    }
+                    
+                    // Set error message as reason for this port scan
+                    if port_result.reason.is_none() {
+                        port_result.reason = Some(format!("Scan error: {} ({})", e, scan_type_clone));
+                    }
+                }
             });
             
             tasks.push(task);
         }
         
         tasks
+    }
+
+    // Initialize all structures needed for scanning
+    pub fn initialize_scan(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Create a ScanMetrics instance to track scan statistics
+        let metrics = ScanMetrics::new();
+        
+        // Wrap metrics in Arc<Mutex<>> for thread-safe sharing
+        let metrics = Arc::new(Mutex::new(metrics));
+        
+        // Share metrics with the scanner instance
+        self.metrics = Some(metrics);
+        
+        // Initialize the results map
+        self.results_map = HashMap::new();
+        
+        Ok(())
     }
 }
