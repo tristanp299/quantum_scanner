@@ -7,6 +7,7 @@ use rand::{thread_rng, Rng};
 use std::sync::Arc;
 use std::fs;
 use std::net::IpAddr;
+use std::io::Write;
 use serde_json;
 use anyhow::{Result, anyhow};
 use tokio::time::sleep;
@@ -100,7 +101,6 @@ AVAILABLE SCAN TYPES:
     xmas        - TCP scan with FIN, URG, and PUSH flags set
     null        - TCP scan with no flags set, may bypass some packet filters
     window      - Analyzes TCP window size responses to determine port status
-    tls-echo    - Uses fake TLS server responses to evade detection
     mimic       - Sends SYN packets with protocol-specific payloads
     frag        - Fragments packets to bypass deep packet inspection
     dns-tunnel  - Tunnels scan traffic through DNS queries
@@ -150,7 +150,7 @@ struct Args {
     // ========== SCAN METHODS ==========
 
     /// Scan techniques to use (comma-separated)
-    #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas\n\n⚠️ OPSEC WARNING: The ssl, tls-echo, and mimic scan types use full TCP connections that are easily logged by target systems. For stealth-critical operations, prefer using only the raw socket scan types like syn, fin, xmas, null, etc.")]
+    #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas\n\n⚠️ OPSEC WARNING: The ssl and mimic scan types use full TCP connections that are easily logged by target systems. For stealth-critical operations, prefer using only the raw socket scan types like syn, fin, xmas, null, etc.")]
     scan_types_str: String,
 
     // ========== EVASION OPTIONS ==========
@@ -200,6 +200,12 @@ struct Args {
     /// Custom lookup domain to use for DNS tunneling
     #[clap(long = "lookup-domain", group = "tunneling_options", help_heading = "TUNNELING OPTIONS")]
     lookup_domain: Option<String>,
+
+    // ========== SERVICE DETECTION ==========
+
+    /// Disable nDPI protocol detection (enabled by default)
+    #[clap(long, default_value_t = false, group = "service_detection", help_heading = "SERVICE DETECTION", long_help = "Disables the default nDPI-based protocol detection. nDPI provides more accurate service identification but may involve brief connection attempts after initial port discovery.")]
+    no_ndpi: bool,
 
     // ========== TIMING AND PERFORMANCE ==========
 
@@ -341,7 +347,6 @@ enum ScanTypeArg {
     Xmas,
     Null,
     Window,
-    TlsEcho,
     Mimic,
     Frag,
 }
@@ -357,7 +362,6 @@ impl From<ScanTypeArg> for ScanType {
             ScanTypeArg::Xmas => ScanType::Xmas,
             ScanTypeArg::Null => ScanType::Null,
             ScanTypeArg::Window => ScanType::Window,
-            ScanTypeArg::TlsEcho => ScanType::TlsEcho,
             ScanTypeArg::Mimic => ScanType::Mimic,
             ScanTypeArg::Frag => ScanType::Frag,
         }
@@ -916,12 +920,14 @@ fn fix_redacted_log(log_file: &PathBuf, ip_address: &str) -> Result<usize, anyho
     }
 }
 
-/// Parses the comma-separated scan types string into a Vec<ScanType>
-///
+/// Parses the scan type string (e.g., "syn,ssl,udp") and returns a vector of ScanTypes.
+/// When evasion flags are set, prompts user to confirm use of non-OPSEC-friendly scan types.
 /// Handles potential errors during parsing.
-fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>> {
+fn parse_scan_types(scan_types_str: &str, evasion: bool, enhanced_evasion: bool) -> Result<Vec<ScanType>> {
     let mut scan_types = Vec::new();
     let mut needs_opsec_warning = false;
+    let mut has_ssl = false;
+    let mut has_mimic = false;
     
     for type_str in scan_types_str.split(',') {
         let trimmed = type_str.trim();
@@ -934,6 +940,7 @@ fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>> {
             "ssl" => {
                 scan_types.push(ScanType::Ssl);
                 needs_opsec_warning = true;
+                has_ssl = true;
             },
             "udp" => scan_types.push(ScanType::Udp),
             "ack" => scan_types.push(ScanType::Ack),
@@ -941,13 +948,10 @@ fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>> {
             "xmas" => scan_types.push(ScanType::Xmas),
             "null" => scan_types.push(ScanType::Null),
             "window" => scan_types.push(ScanType::Window),
-            "tlsecho" | "tls-echo" => {
-                scan_types.push(ScanType::TlsEcho);
-                needs_opsec_warning = true;
-            },
             "mimic" => {
                 scan_types.push(ScanType::Mimic);
                 needs_opsec_warning = true;
+                has_mimic = true;
             },
             "frag" => scan_types.push(ScanType::Frag),
             "dnstunnel" | "dns-tunnel" => {
@@ -967,9 +971,45 @@ fn parse_scan_types(scan_types_str: &str) -> Result<Vec<ScanType>> {
     
     // Show OPSEC warning if needed
     if needs_opsec_warning {
-        warn!("⚠️  OPSEC WARNING: You've selected scan types (ssl, tls-echo, or mimic) that use full TCP connections");
+        warn!("⚠️  OPSEC WARNING: You've selected scan types (ssl or mimic) that use full TCP connections");
         warn!("   These scan types are easily logged by target systems and leave more forensic evidence.");
         warn!("   For stealth-critical operations, consider using only raw socket scans like syn, fin, null, etc.");
+    }
+    
+    // If evasion is enabled and ssl/mimic scans are selected, ask for confirmation
+    if (evasion || enhanced_evasion) && (has_ssl || has_mimic) {
+        let mut scan_type_warnings = Vec::new();
+        if has_ssl { scan_type_warnings.push("SSL"); }
+        if has_mimic { scan_type_warnings.push("Mimic"); }
+        
+        warn!("⚠️  SECURITY CONFLICT: You've enabled evasion ({}) but selected {} scan type(s)",
+             if enhanced_evasion { "enhanced" } else { "basic" },
+             scan_type_warnings.join(" and "));
+        warn!("   These scan types establish full TCP connections which contradicts evasion goals");
+        warn!("   and leaves forensic evidence in target logs.");
+        
+        // Prompt for confirmation
+        print!("   Continue with these scan types anyway? [y/N]: ");
+        std::io::stdout().flush().unwrap();
+        
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        let input = input.trim().to_lowercase();
+        
+        // If not confirmed, remove these scan types
+        if input != "y" && input != "yes" {
+            info!("Removing non-OPSEC-friendly scan types as requested");
+            scan_types.retain(|scan_type| {
+                !matches!(scan_type, ScanType::Ssl | ScanType::Mimic)
+            });
+            
+            // Check if we have any scan types left
+            if scan_types.is_empty() {
+                return Err(anyhow!("No scan types remaining after removing non-OPSEC-friendly types. Please specify other scan types or disable evasion."));
+            }
+        } else {
+            warn!("Proceeding with non-OPSEC-friendly scan types as confirmed by user");
+        }
     }
     
     // Check if tunneling methods are used and appropriate options are set
@@ -1056,7 +1096,7 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // Parse scan types from args.scan_types_str and check for needed privileges
-    let scan_types = parse_scan_types(&args.scan_types_str)?;
+    let scan_types = parse_scan_types(&args.scan_types_str, args.evasion, args.enhanced_evasion)?;
     let needs_raw_sockets = requires_raw_sockets(&scan_types);
     
     // Try to detect local IPv4 if raw sockets are needed
@@ -1186,7 +1226,8 @@ async fn main() -> Result<(), anyhow::Error> {
         args.frag_first_min_size,
         args.frag_two_frags,
         &args.log_file,
-        true, // ml_identification
+        true, // ml_identification - TODO: Make this configurable?
+        !args.no_ndpi, // Enable nDPI unless --no-ndpi is specified
     ).await?;
 
     // Set enhanced evasion options if enabled

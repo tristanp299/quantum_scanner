@@ -71,17 +71,6 @@ pub enum ScanType {
     /// open and closed ports, even when both return RST packets.
     Window,
     
-    /// Uses fake TLS server responses to evade detection
-    /// 
-    /// Attempts to mimic TLS server behavior to bypass application-layer
-    /// inspection systems.
-    /// 
-    /// ! OPSEC WARNING !
-    /// Uses full TCP connections that can be easily logged by target systems.
-    /// Creates more forensic evidence than raw socket scans like SYN, FIN, etc.
-    /// Only use when TLS service verification is necessary for your operation.
-    TlsEcho,
-    
     /// Sends SYN packets with protocol-specific payloads
     /// 
     /// Crafts SYN packets with data that mimics legitimate protocol behavior
@@ -123,7 +112,6 @@ impl fmt::Display for ScanType {
             ScanType::Xmas => write!(f, "XMAS"),
             ScanType::Null => write!(f, "NULL"),
             ScanType::Window => write!(f, "WINDOW"),
-            ScanType::TlsEcho => write!(f, "TLS_ECHO"),
             ScanType::Mimic => write!(f, "MIMIC"),
             ScanType::Frag => write!(f, "FRAG"),
             ScanType::DnsTunnel => write!(f, "DNS_TUNNEL"),
@@ -335,6 +323,12 @@ pub struct PortResult {
     /// This allows displaying different reasons for different scan types,
     /// providing more detailed and accurate information about responses for each technique.
     pub tcp_reasons: HashMap<ScanType, String>,
+
+    /// Protocol guess from nDPI analysis.
+    pub ndpi_protocol: Option<String>,
+
+    /// Confidence level of the nDPI protocol guess.
+    pub ndpi_confidence: Option<String>,
 }
 
 impl Default for PortResult {
@@ -359,6 +353,8 @@ impl Default for PortResult {
             final_status: PortStatus::Filtered, // Default to Filtered
             reason: None, // Default to None
             tcp_reasons: HashMap::new(),
+            ndpi_protocol: None,
+            ndpi_confidence: None,
         }
     }
 }

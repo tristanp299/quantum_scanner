@@ -100,6 +100,10 @@ pub struct QuantumScanner {
     metrics: Option<Arc<Mutex<ScanMetrics>>>,
     /// Results map to store scan results by port
     results_map: HashMap<u16, PortResult>,
+    /// Flag to enable/disable nDPI analysis (default: true)
+    enable_ndpi: bool,
+    /// Optional nDPI engine instance (initialized if enable_ndpi is true)
+    ndpi_engine: Option<Arc<Mutex<ndpi_integration::NdpiEngine>>>,
     // TODO: Add state for rate limiting if max_rate > 0 - Implemented basic delay
 }
 
@@ -130,6 +134,7 @@ impl QuantumScanner {
         frag_two_frags: bool,
         log_file: &Path, // Use the log_file parameter
         ml_identification: bool, // Added ml_identification parameter
+        enable_ndpi: bool, // Add enable_ndpi parameter
     ) -> Result<Self> {
         // Log the start of the scanner initialization
         // This helps in debugging setup issues
@@ -307,6 +312,8 @@ impl QuantumScanner {
             dns_tunnel_domain: None,
             metrics: None,
             results_map: HashMap::new(),
+            enable_ndpi, // Store enable_ndpi flag
+            ndpi_engine: None, // Initialize ndpi_engine as None
         })
     }
     
@@ -321,6 +328,32 @@ impl QuantumScanner {
     pub async fn run_scan(&mut self) -> Result<ScanResults> {
         let start_time = Utc::now();
         info!("Starting scan for target: {} ({})", self.target, self.target_ip);
+
+        // --- nDPI Initialization ---
+        // Initialize nDPI engine if enabled
+        if self.enable_ndpi {
+            info!("Initializing nDPI engine...");
+            match ndpi_integration::NdpiEngine::new() {
+                Ok(engine) => {
+                    info!("nDPI engine initialized successfully.");
+                    self.ndpi_engine = Some(Arc::new(Mutex::new(engine)));
+                }
+                Err(e) => {
+                    warn!("Failed to initialize nDPI engine: {}. Disabling nDPI analysis.", e);
+                    self.enable_ndpi = false; // Disable if initialization fails
+                    self.ndpi_engine = None;
+                }
+            }
+            // OPSEC Warning for nDPI
+             warn!("⚠️ OPSEC WARNING: Default nDPI analysis is enabled.");
+             warn!("   This involves brief connection attempts after initial port discovery,");
+             warn!("   which is less stealthy than raw scans alone.");
+             warn!("   Use the --no-ndpi flag to disable this behavior for maximum stealth.");
+        } else {
+            info!("nDPI analysis is disabled.");
+            self.ndpi_engine = None;
+        }
+        // --- End nDPI Initialization ---
 
         // Shared state for collecting results across asynchronous tasks.
         // - `results_map`: Stores detailed `PortResult` for each scanned port.
@@ -412,6 +445,47 @@ impl QuantumScanner {
                 info!("Proceeding with analysis of available results...");
             }
         }
+
+        // --- nDPI Analysis Phase ---
+        let mut ndpi_tasks = Vec::new();
+        if self.enable_ndpi && self.ndpi_engine.is_some() {
+            let ndpi_engine_clone = self.ndpi_engine.as_ref().unwrap().clone();
+            let open_ports_for_ndpi = open_ports_set.lock().await.clone(); // Get ports marked open/openfiltered
+            info!("[nDPI] Starting analysis phase for {} potential ports...", open_ports_for_ndpi.len());
+            let ndpi_semaphore = Arc::new(Semaphore::new(self.concurrency / 2 + 1)); // Use separate semaphore for nDPI
+
+            for port in open_ports_for_ndpi {
+                let ndpi_engine_task_clone = ndpi_engine_clone.clone();
+                let results_map_task_clone = results_map.clone();
+                let target_ip_task_clone = target_ip;
+                let timeout_task_clone = self.timeout_scan; // Reuse scan timeout for nDPI connection attempt
+                let semaphore_task_clone = ndpi_semaphore.clone();
+
+                ndpi_tasks.push(tokio::spawn(async move {
+                     let _permit = match semaphore_task_clone.acquire().await {
+                         Ok(p) => p,
+                         Err(_) => return, // Semaphore closed
+                     };
+                    Self::perform_ndpi_analysis(
+                        target_ip_task_clone,
+                        port,
+                        timeout_task_clone,
+                        ndpi_engine_task_clone,
+                        results_map_task_clone,
+                    ).await;
+                }));
+            }
+
+             // Wait for nDPI analysis tasks to complete
+             match tokio::time::timeout(
+                 Duration::from_secs(60 * 3), // 3 minute timeout for nDPI analysis
+                 join_all(ndpi_tasks)
+             ).await {
+                 Ok(_) => info!("[nDPI] Analysis phase complete."),
+                 Err(_) => warn!("[nDPI] Analysis phase timed out after 3 minutes."),
+             }
+        }
+        // --- End nDPI Analysis Phase ---
 
         // Initialize metrics if not already initialized
         if self.metrics.is_none() {
@@ -707,6 +781,15 @@ impl QuantumScanner {
         if debug_mode {
             debug!("Tasks attempted (packets_sent counter): {}, Tasks completed without error (successful_scans counter): {}", final_packets_sent, final_successful_scans);
         }
+
+        // --- nDPI Cleanup ---
+        if let Some(engine_arc) = self.ndpi_engine.take() {
+            // Explicitly drop the Arc<Mutex<NdpiEngine>>
+            // The actual cleanup within NdpiEngine should happen in its Drop impl
+            drop(engine_arc);
+            info!("nDPI engine resources released.");
+        }
+        // --- End nDPI Cleanup ---
 
         Ok(ScanResults {
             target: self.target.clone(),
@@ -1152,33 +1235,6 @@ impl QuantumScanner {
                             result
                         })
                     },
-                    ScanType::TlsEcho => {
-                        let _payload: Vec<u8> = vec![]; // Empty payload in this case
-                        techniques::tls_echo_scan(
-                            target_ip_clone,
-                            port_clone,
-                            local_ip,
-                            use_ipv6_clone,
-                            _evasion_clone,
-                            timeout_scan_clone
-                        ).await.map(|status| {
-                            // Create reason for TLS echo scan
-                            let reason = match status {
-                                PortStatus::Open => Some("TLS Echo scan: TCP connection established successfully, TLS service likely present".to_string()),
-                                PortStatus::Closed => Some("TLS Echo scan: TCP connection refused, port is closed".to_string()),
-                                PortStatus::Filtered => Some("TLS Echo scan: TCP connection attempt timed out, port is filtered by firewall".to_string()),
-                                _ => None
-                            };
-                            
-                            let mut result = ScanResult::new(port_clone, status);
-                            result.set_reason(reason.clone());
-                            
-                            // For converting to PortResult later
-                            result.scan_type = Some(ScanType::TlsEcho);
-                            
-                            result
-                        })
-                    },
                     ScanType::Mimic => {
                         let payload_bytes = MimicPayloads::get(&mimic_protocol_clone);
                         techniques::mimic_scan_with_payload(
@@ -1322,6 +1378,89 @@ impl QuantumScanner {
         }
         
         tasks
+    }
+
+    /// Performs nDPI analysis on an open port by making a brief connection.
+    async fn perform_ndpi_analysis(
+        target_ip: IpAddr,
+        port: u16,
+        timeout_duration: Duration,
+        ndpi_engine: Arc<Mutex<ndpi_integration::NdpiEngine>>,
+        results_map: Arc<Mutex<HashMap<u16, PortResult>>>,
+    ) {
+        debug!("[nDPI:{}:{}] Attempting analysis", target_ip, port);
+        let socket_addr = SocketAddr::new(target_ip, port);
+
+        // Attempt to connect
+        let connect_future = tokio::net::TcpStream::connect(socket_addr);
+        match timeout(timeout_duration, connect_future).await {
+            Ok(Ok(mut stream)) => {
+                debug!("[nDPI:{}:{}] Connection established", target_ip, port);
+                // Try to read some initial data (e.g., potential banner/greeting)
+                let mut buffer = vec![0u8; 2048]; // Read up to 2KB
+                let read_future = stream.read(&mut buffer);
+
+                match timeout(timeout_duration, read_future).await {
+                    Ok(Ok(bytes_read)) => {
+                        if bytes_read > 0 {
+                            debug!("[nDPI:{}:{}] Read {} bytes for analysis", target_ip, port, bytes_read);
+                            let packet_data = &buffer[..bytes_read];
+                            // TODO: Need flow information (src/dst IP/port) - Using placeholders
+                            let src_ip = "0.0.0.0".parse().unwrap(); // Placeholder
+                            let dst_ip = target_ip.to_string().parse().unwrap(); // Use target IP
+                            let src_port = 12345; // Placeholder
+                            let dst_port = port;
+
+                            // Lock the engine and analyze
+                            let mut engine_guard = ndpi_engine.lock().await;
+                            engine_guard.analyze_packet(src_ip, dst_ip, src_port, dst_port, packet_data);
+                            let (protocol, confidence) = engine_guard.get_flow_results(src_ip, dst_ip, src_port, dst_port);
+
+                            debug!("[nDPI:{}:{}] Detected Protocol: {:?}, Confidence: {:?}", target_ip, port, protocol, confidence);
+
+                            // Update results map
+                            let mut map_guard = results_map.lock().await;
+                            if let Some(port_result) = map_guard.get_mut(&port) {
+                                port_result.ndpi_protocol = protocol;
+                                port_result.ndpi_confidence = confidence;
+                            }
+                        } else {
+                            debug!("[nDPI:{}:{}] Read 0 bytes, connection closed?", target_ip, port);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        debug!("[nDPI:{}:{}] Read error: {}", target_ip, port, e);
+                    }
+                    Err(_) => {
+                        debug!("[nDPI:{}:{}] Read timeout", target_ip, port);
+                        // Even if timeout, attempt analysis with potentially empty data if engine supports it
+                        let src_ip = "0.0.0.0".parse().unwrap();
+                        let dst_ip = target_ip.to_string().parse().unwrap();
+                        let src_port = 12345;
+                        let dst_port = port;
+                         let mut engine_guard = ndpi_engine.lock().await;
+                         // Pass empty slice if read timed out
+                         engine_guard.analyze_packet(src_ip, dst_ip, src_port, dst_port, &[]);
+                         let (protocol, confidence) = engine_guard.get_flow_results(src_ip, dst_ip, src_port, dst_port);
+                          debug!("[nDPI:{}:{}] Detected Protocol (after timeout): {:?}, Confidence: {:?}", target_ip, port, protocol, confidence);
+                         let mut map_guard = results_map.lock().await;
+                         if let Some(port_result) = map_guard.get_mut(&port) {
+                             port_result.ndpi_protocol = protocol;
+                             port_result.ndpi_confidence = confidence;
+                         }
+                    }
+                }
+                // Close the connection gracefully
+                let _ = stream.shutdown().await;
+
+            },
+            Ok(Err(e)) => {
+                debug!("[nDPI:{}:{}] Connection failed: {}", target_ip, port, e);
+            },
+            Err(_) => {
+                debug!("[nDPI:{}:{}] Connection timeout", target_ip, port);
+            }
+        }
     }
 
     // Initialize all structures needed for scanning

@@ -433,41 +433,8 @@ pub async fn syn_scan(
         ttl_jitter
     ).await;
     
-    match raw_result {
-        Ok(status) => {
-            // If we get a definitive result from raw scan, use it
-            if status == PortStatus::Open || status == PortStatus::Closed {
-                debug!("[SYN Scan:{}:{}] Raw socket scan successful: {:?}", target_ip, port, status);
-                return Ok(status);
-            }
-            
-            // For filtered/uncertain results, try a direct TCP connect as fallback
-            debug!("[SYN Scan:{}:{}] Raw scan inconclusive ({:?}), trying direct connect", target_ip, port, status);
-        },
-        Err(e) => {
-            // Raw socket scan failed, retry with direct connect
-            debug!("[SYN Scan:{}:{}] Raw socket scan failed: {}, trying direct connect", target_ip, port, e);
-        }
-    }
-    
-    // Second attempt: Direct TCP connect (more reliable but less stealthy)
-    let socket_addr = SocketAddr::new(target_ip, port);
-    match tokio::time::timeout(timeout_duration, tokio::net::TcpStream::connect(socket_addr)).await {
-        Ok(Ok(_)) => {
-            debug!("[SYN Scan:{}:{}] Direct connect successful, port is OPEN", target_ip, port);
-            Ok(PortStatus::Open)
-        },
-        Ok(Err(e)) => {
-            // Connection errors typically mean closed port
-            debug!("[SYN Scan:{}:{}] Direct connect failed: {:?}, port is CLOSED", target_ip, port, e);
-            Ok(PortStatus::Closed)
-        },
-        Err(_) => {
-            // Timeout usually means filtered 
-            debug!("[SYN Scan:{}:{}] Direct connect timed out, port is FILTERED", target_ip, port);
-            Ok(PortStatus::Filtered)
-        }
-    }
+    // Directly return the result of the raw SYN scan, removing the fallback logic.
+    raw_result
 }
 
 /// Helper function: Raw socket implementation of SYN scan
@@ -1170,36 +1137,6 @@ pub async fn fin_scan(
             error!("[FIN Scan:{}:{}] Error during scan: {}", target_ip, port, e);
             Err(e)
         }
-    }
-}
-
-/// TLS Echo scan implementation
-/// (remains unchanged, uses standard sockets)
-pub async fn tls_echo_scan(
-    target_ip: IpAddr,
-    port: u16,
-    _local_ip: Option<IpAddr>,
-    _use_ipv6: bool,
-    _evasion: bool,
-    timeout_duration: Duration,
-) -> Result<PortStatus> {
-    debug!("[TLS Echo Scan:{}:{}] Performing standard socket TCP connect", target_ip, port);
-    let socket_addr = SocketAddr::new(target_ip, port);
-
-    match timeout(timeout_duration, tokio::net::TcpStream::connect(socket_addr)).await {
-        Ok(Ok(_stream)) => {
-             // Connected, assume open for TLS echo (doesn't perform TLS handshake)
-             debug!("[TLS Echo Scan:{}:{}] Port is open (TCP connect succeeded)", target_ip, port);
-             Ok(PortStatus::Open)
-        },
-        Ok(Err(_)) => {
-            debug!("[TLS Echo Scan:{}:{}] Port is closed (TCP connect failed)", target_ip, port);
-            Ok(PortStatus::Closed)
-        },
-        Err(_) => {
-            debug!("[TLS Echo Scan:{}:{}] Port is filtered (TCP connect timed out)", target_ip, port);
-            Ok(PortStatus::Filtered)
-        },
     }
 }
 
