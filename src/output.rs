@@ -42,6 +42,15 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
     output.push_str(&format!("Scan Duration: {:.2} seconds\n", 
         results.end_time.signed_duration_since(results.start_time).num_milliseconds() as f64 / 1000.0));
     
+    // Indicate scan mode
+    let has_service_info = results.results.values()
+        .any(|r| r.service.is_some() || r.version.is_some() || r.banner.is_some() || r.ndpi_protocol.is_some());
+    if has_service_info {
+        output.push_str("Scan Mode: Service scan (-sV) - Includes service identification\n");
+    } else {
+        output.push_str("Scan Mode: Port scan (-sP) - Limited service information\n");
+    }
+    
     // Scan types used
     output.push_str("Scan types: ");
     for (i, scan_type) in results.scan_types.iter().enumerate() {
@@ -155,6 +164,15 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
             
             if let Some(version) = &port_result.version {
                 output.push_str(&format!("Version: {}\n", version));
+            }
+            
+            // nDPI protocol detection if available
+            if let Some(protocol) = &port_result.ndpi_protocol {
+                output.push_str(&format!("Protocol (nDPI): {}", protocol));
+                if let Some(confidence) = &port_result.ndpi_confidence {
+                    output.push_str(&format!(" (Confidence: {})", confidence));
+                }
+                output.push_str("\n");
             }
             
             // States by scan type
@@ -376,6 +394,16 @@ pub fn print_results(results: &ScanResults, verbose: bool) -> Result<()> {
     // Print header
     println!("{}", style("Quantum Scanner Results").cyan().bold());
     println!("Target: {} ({})", style(&results.target).green(), results.target_ip);
+    
+    // Display scan mode
+    let has_service_info = results.results.values()
+        .any(|r| r.service.is_some() || r.version.is_some() || r.banner.is_some() || r.ndpi_protocol.is_some());
+    if has_service_info {
+        println!("Scan Mode: {}", style("Service scan (-sV)").yellow().bold());
+    } else {
+        println!("Scan Mode: {}", style("Port scan (-sP)").yellow().bold());
+        println!("{}", style("Note: Limited service information. Use -sV for detailed service detection.").italic());
+    }
     
     // Enhanced scan details when verbose mode is enabled
     if verbose {
@@ -663,6 +691,14 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
         
         if let Some(version) = &port_result.version {
             println!("Version: {}", version);
+        }
+        
+        // nDPI protocol detection if available
+        if let Some(protocol) = &port_result.ndpi_protocol {
+            println!("Protocol (nDPI): {}", protocol);
+            if let Some(confidence) = &port_result.ndpi_confidence {
+                println!("Confidence: {}", confidence);
+            }
         }
         
         // Determine state

@@ -19,6 +19,10 @@ This scanner provides a range of capabilities tailored for sophisticated network
     -   `DNS Tunnel`: Tunnels scan traffic through DNS queries to bypass restrictive firewalls that allow DNS traffic.
     -   `ICMP Tunnel`: Tunnels scan traffic through ICMP echo (ping) packets to bypass restrictive firewalls that allow ICMP traffic.
 
+-   **Scan Modes:** Provides dedicated scan modes to balance stealth with information gathering:
+    -   **Port Scan Mode (`-sP`):** Focuses solely on discovering open ports with minimal footprint. Disables nDPI, banner grabbing, and service version detection for maximum OPSEC. This is the default mode.
+    -   **Service Scan Mode (`-sV`):** Performs additional connections after discovering open ports to identify services using nDPI, banner grabbing, and protocol analysis. Provides richer information but increases detection risk.
+
 -   **Enhanced Evasion Techniques:** Employs methods to avoid detection by network security monitoring tools. This includes packet fragmentation (`Frag`), traffic mimicry (`Mimic`), random timing delays (`--random-delay`), source port manipulation, and potentially decoy scanning (consult specific options).
 
 -   **Memory-Only Mode (`-m`):** Designed for high-stakes operations where leaving traces on disk is unacceptable. Aims to load and execute the scanner primarily in RAM, minimizing forensic artifacts on the host system. (Requires suitable OS support/configuration, may involve RAM disk usage).
@@ -139,6 +143,22 @@ Performs a default scan (often a SYN scan of common TCP ports) against the targe
 sudo ./quantum_scanner 192.168.1.1
 ```
 
+### Basic Port Scan (Maximum Stealth)
+
+Performs a port scan focusing only on discovering open ports without additional service identification, maximizing stealth.
+
+```bash
+sudo ./quantum_scanner -sP 192.168.1.1
+```
+
+### Service and Version Detection
+
+Performs a scan that includes service and version detection, involving additional connections to identified open ports.
+
+```bash
+sudo ./quantum_scanner -sV 192.168.1.1
+```
+
 ### Scan Specific Ports
 
 Scans only the specified ports (TCP 22, 80, 443 in this case).
@@ -219,12 +239,15 @@ Here's a list of all available command options and their descriptions:
 - `TARGET` - Target IP address, hostname, or CIDR subnet (required)
 - `-p, --ports <PORTS>` - Ports to scan as comma-separated list or ranges (default: "1-1000")
 - `-T, --top-100` - Scan the top 100 common ports instead of specified range
+- `-t, --top-10` -  Scan the top 10 common ports instead of specified range
 
 #### Scan Methods
 - `-s, --scan-types-str <TYPES>` - Scan techniques to use as comma-separated list (default: "syn")
-  - Available scan types: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag
+  - Available scan types: syn, ssl, udp, ack, fin, xmas, null, window, mimic, frag
   - Example: `-s syn,fin,xmas`
-  
+- `-sP, --port-scan` - Enable port scan only mode (no service identification)
+- `-sV, --service-scan` - Enable service and version detection (less stealthy)
+
 #### Scan Control
 - `-c, --concurrency <NUM>` - Maximum concurrent scan operations (default: 100)
 - `-r, --rate <RATE>` - Maximum packets per second (default: random between 100-500)
@@ -306,8 +329,9 @@ Here's a list of all available command options and their descriptions:
     *   **Scan Selection:** Choose scan types (`-s`) appropriate for the target environment. A loud TCP connect scan might be fine in some contexts but disastrous in others. Start with stealthier methods.
 
 3.  **Scan Type Selection for OPSEC:**
-    *   **Stealth vs. Information Tradeoff:** More stealthy scan types (SYN, FIN, NULL) provide less information but leave fewer traces, while more informative scan types (SSL, TLS-Echo, Mimic) create more forensic evidence.
-    *   **TCP Connect Concerns:** Scans that use TCP connect functionality (SSL, TLS-Echo, Mimic) create full connections that:
+    *   **Scan Mode Selection:** Use `-sP` (port scan only) for maximum stealth when you only need to identify open ports. Only use `-sV` (service scan) when you need detailed service information and are willing to accept the additional risk.
+    *   **Stealth vs. Information Tradeoff:** More stealthy scan types (SYN, FIN, NULL) provide less information but leave fewer traces, while more informative scan types (SSL, Mimic) create more forensic evidence.
+    *   **TCP Connect Concerns:** Scans that use TCP connect functionality (SSL, Mimic) create full connections that:
         * Are logged by most systems (connection logs, firewall logs)
         * Can be tied directly to your source IP
         * May trigger alerting thresholds more quickly than half-open scans
@@ -565,14 +589,17 @@ cargo build --release --features minimal-static --no-default-features
 
 ### Using Protocol Detection
 
-When scanning with service detection enabled, nDPI will automatically be used:
+Service detection including nDPI analysis is only performed in Service Scan mode:
 
 ```bash
 # Basic scan with service detection
-sudo ./target/release/quantum_scanner -t example.com --ports 1-1000 --service-scan
+sudo ./target/release/quantum_scanner -sV example.com --ports 1-1000
+
+# Default port scan without service detection
+sudo ./target/release/quantum_scanner -sP example.com --ports 1-1000
 
 # Verbose output to see protocol details
-sudo ./target/release/quantum_scanner -t example.com --ports 80,443,22,8080 -v --service-scan
+sudo ./target/release/quantum_scanner -sV example.com --ports 80,443,22,8080 -v
 
 # List all supported protocols
 sudo ./target/release/quantum_scanner --list-protocols

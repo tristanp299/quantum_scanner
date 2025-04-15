@@ -101,7 +101,7 @@ pub struct QuantumScanner {
     /// Results map to store scan results by port
     results_map: HashMap<u16, PortResult>,
     /// Flag to enable/disable nDPI analysis (default: true)
-    enable_ndpi: bool,
+    service_scan_mode: bool,
     /// Optional nDPI engine instance (initialized if enable_ndpi is true)
     ndpi_engine: Option<Arc<Mutex<ndpi_integration::NdpiEngine>>>,
     // TODO: Add state for rate limiting if max_rate > 0 - Implemented basic delay
@@ -134,7 +134,7 @@ impl QuantumScanner {
         frag_two_frags: bool,
         log_file: &Path, // Use the log_file parameter
         ml_identification: bool, // Added ml_identification parameter
-        enable_ndpi: bool, // Add enable_ndpi parameter
+        service_scan_mode: bool, // Add service_scan_mode parameter
     ) -> Result<Self> {
         // Log the start of the scanner initialization
         // This helps in debugging setup issues
@@ -312,7 +312,7 @@ impl QuantumScanner {
             dns_tunnel_domain: None,
             metrics: None,
             results_map: HashMap::new(),
-            enable_ndpi, // Store enable_ndpi flag
+            service_scan_mode, // Store service_scan_mode flag
             ndpi_engine: None, // Initialize ndpi_engine as None
         })
     }
@@ -331,7 +331,7 @@ impl QuantumScanner {
 
         // --- nDPI Initialization ---
         // Initialize nDPI engine if enabled
-        if self.enable_ndpi {
+        if self.service_scan_mode {
             info!("Initializing nDPI engine...");
             match ndpi_integration::NdpiEngine::new() {
                 Ok(engine) => {
@@ -340,7 +340,7 @@ impl QuantumScanner {
                 }
                 Err(e) => {
                     warn!("Failed to initialize nDPI engine: {}. Disabling nDPI analysis.", e);
-                    self.enable_ndpi = false; // Disable if initialization fails
+                    self.service_scan_mode = false; // Disable if initialization fails
                     self.ndpi_engine = None;
                 }
             }
@@ -448,7 +448,7 @@ impl QuantumScanner {
 
         // --- nDPI Analysis Phase ---
         let mut ndpi_tasks = Vec::new();
-        if self.enable_ndpi && self.ndpi_engine.is_some() {
+        if self.service_scan_mode && self.ndpi_engine.is_some() {
             let ndpi_engine_clone = self.ndpi_engine.as_ref().unwrap().clone();
             let open_ports_for_ndpi = open_ports_set.lock().await.clone(); // Get ports marked open/openfiltered
             info!("[nDPI] Starting analysis phase for {} potential ports...", open_ports_for_ndpi.len());
@@ -509,6 +509,7 @@ impl QuantumScanner {
         let debug = self.debug;
         let timeout_banner = self.timeout_banner;
         let ml_identification = self.ml_identification;
+        let service_scan_mode = self.service_scan_mode;
         
         // Create a new copy of self.memory_log to avoid borrowing self
         let memory_log_local = memory_log.clone();
@@ -528,8 +529,9 @@ impl QuantumScanner {
         // Declare analysis_tasks vector outside the if block
         let mut analysis_tasks = Vec::new();
         
-        // Skip post-scan analysis if no open ports found
-        if !open_ports.is_empty() {
+        // Skip post-scan analysis if no open ports found or service scan mode is disabled
+        if !open_ports.is_empty() && service_scan_mode {
+            info!("Running service identification on discovered ports...");
             // Now run banner grabbing and service identification for all open ports
             for port in &open_ports {
                 let port = *port; // Dereference inside the loop

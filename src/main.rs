@@ -153,6 +153,14 @@ struct Args {
     #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas\n\n⚠️ OPSEC WARNING: The ssl and mimic scan types use full TCP connections that are easily logged by target systems. For stealth-critical operations, prefer using only the raw socket scan types like syn, fin, xmas, null, etc.")]
     scan_types_str: String,
 
+    /// Enable port scan only mode (no service identification)
+    #[clap(short = 'P', long = "port-scan", group = "scan_mode", help_heading = "SCAN METHODS", long_help = "Enables port scan only mode. This mode focuses solely on discovering open ports with minimal footprint. Disables nDPI, banner grabbing, and service version detection for maximum OPSEC.")]
+    port_scan_only: bool,
+
+    /// Enable service and version detection (less stealthy)
+    #[clap(short = 'V', long = "service-scan", group = "scan_mode", help_heading = "SCAN METHODS", long_help = "Enables service and version detection. This mode performs additional connections after discovering open ports to identify services using nDPI, banner grabbing, and protocol analysis. Note: This is less stealthy as it requires establishing full TCP connections.")]
+    service_scan: bool,
+
     // ========== EVASION OPTIONS ==========
 
     /// Enable basic evasion techniques 
@@ -202,10 +210,6 @@ struct Args {
     lookup_domain: Option<String>,
 
     // ========== SERVICE DETECTION ==========
-
-    /// Disable nDPI protocol detection (enabled by default)
-    #[clap(long, default_value_t = false, group = "service_detection", help_heading = "SERVICE DETECTION", long_help = "Disables the default nDPI-based protocol detection. nDPI provides more accurate service identification but may involve brief connection attempts after initial port discovery.")]
-    no_ndpi: bool,
 
     // ========== TIMING AND PERFORMANCE ==========
 
@@ -1099,6 +1103,22 @@ async fn main() -> Result<(), anyhow::Error> {
     let scan_types = parse_scan_types(&args.scan_types_str, args.evasion, args.enhanced_evasion)?;
     let needs_raw_sockets = requires_raw_sockets(&scan_types);
     
+    // Determine the scanning mode
+    let service_scan_mode = if args.port_scan_only {
+        // Port scan only mode explicitly chosen
+        info!("Port scan only mode selected (-sP). Service identification disabled for improved stealth.");
+        false
+    } else if args.service_scan {
+        // Service scan mode explicitly chosen
+        info!("Service scan mode selected (-sV). Will perform additional connections for service identification.");
+        true
+    } else {
+        // Neither flag specified, default to port scan only
+        info!("No scan mode specified. Defaulting to port scan only mode for improved stealth.");
+        info!("Use -sV to enable detailed service identification.");
+        false
+    };
+    
     // Try to detect local IPv4 if raw sockets are needed
     let local_ip_v4 = if needs_raw_sockets {
         info!("Raw socket scans selected. Attempting to detect local IPv4 address.");
@@ -1227,7 +1247,7 @@ async fn main() -> Result<(), anyhow::Error> {
         args.frag_two_frags,
         &args.log_file,
         true, // ml_identification - TODO: Make this configurable?
-        !args.no_ndpi, // Enable nDPI unless --no-ndpi is specified
+        service_scan_mode, // Pass the determined service scan mode
     ).await?;
 
     // Set enhanced evasion options if enabled
