@@ -1,7 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::io::Read;
 
 use anyhow::{Result, anyhow};
 use log::{debug, error, warn};
@@ -15,7 +14,7 @@ use rustls::pki_types::ServerName;
 #[allow(unused_imports)]
 use sha2::{Sha256, Digest};
 use tokio::net::{UdpSocket}; // Removed TcpSocket import
-use tokio::time::{sleep, timeout};
+use tokio::time::{timeout};
 // Comment out the unused import
 // use webpki_roots::TLS_SERVER_ROOTS;
 
@@ -596,114 +595,215 @@ pub async fn ssl_scan(
     port: u16,
     timeout_duration: Duration,
 ) -> Result<(PortStatus, Option<CertificateInfo>, String)> {
-    debug!("[TLS Scan:{}:{}] Performing standard socket TLS scan", target_ip, port);
-
-    // Create a secure SSL/TLS configuration with system root certificates
-    let mut root_store = RootCertStore::empty();
+    // Log scan attempt for debugging
+    debug!("[{}:{}] Starting SSL/TLS scan", target_ip, port);
     
-    // Add certificates directly
-    let cert_der_bytes = webpki_roots::TLS_SERVER_ROOTS
-        .iter()
-        .flat_map(|ta| {
-            let cert = rustls::pki_types::CertificateDer::from(ta.subject.to_vec());
-            std::iter::once(cert)
-        })
-        .collect::<Vec<_>>();
+    // Create a more robust connection timeout to prevent hangs
+    let connect_future = async {
+        let socket_addr = SocketAddr::new(target_ip, port);
+        let tcp_stream = tokio::net::TcpStream::connect(socket_addr).await?;
+        // Set TCP_NODELAY to optimize performance
+        tcp_stream.set_nodelay(true)?;
+        Ok::<tokio::net::TcpStream, anyhow::Error>(tcp_stream)
+    };
     
-    // Add certificates to store
-    let (_added, skipped) = root_store.add_parsable_certificates(cert_der_bytes);
-    if skipped > 0 {
-        warn!("Skipped {} certificates when adding to root store", skipped);
-    }
-
-    let config = ClientConfig::builder()
-        .with_root_certificates(Arc::new(root_store)) // Use builder with root certs
-        .with_no_client_auth();
-
-    // First establish a basic TCP connection
-    let socket_addr = SocketAddr::new(target_ip, port);
-    let jitter = rand::thread_rng().gen_range(5..30);
-    sleep(Duration::from_millis(jitter)).await;
-    let socket = match timeout(timeout_duration, tokio::net::TcpStream::connect(socket_addr)).await {
-        Ok(Ok(socket)) => {
-            debug!("[TLS Scan:{}:{}] TCP connection successful", target_ip, port);
-            socket
+    // Apply timeout to connection attempt
+    let tcp_stream = match timeout(timeout_duration, connect_future).await {
+        Ok(Ok(stream)) => {
+            debug!("[{}:{}] TCP connection established", target_ip, port);
+            stream
         },
         Ok(Err(e)) => {
-            debug!("[TLS Scan:{}:{}] TCP connection failed: {}", target_ip, port, e);
-            return Ok((PortStatus::Closed, None, String::new()));
+            debug!("[{}:{}] TCP connection failed: {}", target_ip, port, e);
+            return Ok((PortStatus::Closed, None, format!("Connection error: {}", e)));
         },
         Err(_) => {
-            debug!("[TLS Scan:{}:{}] TCP connection timeout", target_ip, port);
-            return Ok((PortStatus::Filtered, None, String::new()));
-        },
-    };
-
-    // Convert tokio socket to std socket for rustls
-    let mut std_socket = match socket.into_std() {
-        Ok(s) => s,
-        Err(e) => {
-            debug!("[TLS Scan:{}:{}] Failed to convert socket: {}", target_ip, port, e);
-            return Ok((PortStatus::Open, None, "Socket conversion error".to_string()));
+            debug!("[{}:{}] TCP connection timeout", target_ip, port);
+            return Ok((PortStatus::Filtered, None, "Connection timeout".to_string()));
         }
     };
-    if let Err(e) = std_socket.set_nonblocking(true) {
-        debug!("[TLS Scan:{}:{}] Failed to set non-blocking mode: {}", target_ip, port, e);
-        return Ok((PortStatus::Open, None, "Socket config error".to_string()));
+    
+    // Set up TLS configuration with better error handling
+    let mut root_store = RootCertStore::empty();
+    
+    // Add WebPKI roots when not in minimal-static build
+    #[cfg(not(feature = "minimal-static"))]
+    {
+        // Try to add system certificate store, fall back to WebPKI if it fails
+        match rustls_native_certs::load_native_certs() {
+            Ok(certs) => {
+                let mut added = 0;
+                for cert in certs {
+                    if root_store.add(cert).is_ok() {
+                        added += 1;
+                    }
+                }
+                if added == 0 {
+                    // Fall back to a simpler solution for this build
+                    // For port scanning, we don't strictly need trusted certificates
+                    debug!("Using empty root store for SSL scan - certificates won't be verified");
+                    root_store = rustls::RootCertStore::empty();
+                }
+            },
+            Err(_) => {
+                // Fall back to a simpler solution for this build
+                // For port scanning, we don't strictly need trusted certificates
+                debug!("Using empty root store for SSL scan - certificates won't be verified");
+                root_store = rustls::RootCertStore::empty();
+            }
+        }
     }
+    
+    // For minimal-static builds, use an empty cert store (we're just testing connectivity)
+    
+    // Create client configuration
+    let config = ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
 
-    // Get server name for TLS connection (the IP address as a string)
-    let server_name = match ServerName::try_from(format!("scan.{}.example.com", target_ip.to_string())) {
-        Ok(name) => name,
-        Err(_) => {
-            // If parsing fails, use a placeholder domain that should always parse successfully
-            debug!("[TLS Scan:{}:{}] Using placeholder server name due to IP literal", target_ip, port);
-            ServerName::try_from("placeholder-quantum-scanner.example.com").unwrap()
+    // Create TLS connection
+    // Convert target_ip to DNS name format required by rustls
+    let server_name = match target_ip {
+        IpAddr::V4(ipv4) => {
+            // Create a ServerName::IpAddr
+            ServerName::IpAddress(ipv4.into())
+        },
+        IpAddr::V6(ipv6) => {
+            // Create a ServerName::IpAddr
+            ServerName::IpAddress(ipv6.into())
         }
     };
-
-    // Set up TLS connection
-    let conn_result = ClientConnection::new(Arc::new(config), server_name);
-    let mut conn = match conn_result {
+    
+    let mut tls_conn = match ClientConnection::new(Arc::new(config), server_name) {
         Ok(conn) => conn,
         Err(e) => {
-            // Port is clearly open if we got here, but TLS failed.
-            debug!("[TLS Scan:{}:{}] TLS negotiation failed: {}", target_ip, port, e);
-            return Ok((PortStatus::Open, None, format!("TLS error: {}", e)));
+            debug!("[{}:{}] TLS client creation error: {}", target_ip, port, e);
+            // This is a client-side setup error, not indicative of port status
+            // TCP connection succeeded, so port is likely open
+            return Ok((PortStatus::Open, None, format!("TLS setup error: {}", e)));
         }
     };
-
-    // Perform handshake
-    let mut tls_stream = rustls::Stream::new(&mut conn, &mut std_socket);
-    let mut handshake_buf = [0u8; 1]; // Minimal read to drive handshake
-    // Use a timeout for the handshake attempt itself
-    let handshake_result = timeout(timeout_duration, async { tls_stream.read(&mut handshake_buf) }).await;
-
-    // Even if handshake read times out or errors, we might still get cert/version info
-     if handshake_result.is_err() {
-         debug!("[TLS Scan:{}:{}] Handshake read timed out or failed, but proceeding to check cert/version", target_ip, port);
-     }
-
-    // Extract certificate information
-    #[cfg(not(feature = "minimal-static"))]
-    let cert_info = if let Some(certs) = conn.peer_certificates() {
-        // Access certificate data using certs[0].as_ref()
-        if !certs.is_empty() { parse_certificate(certs[0].as_ref()) } else { None }
-    } else { None };
-    #[cfg(feature = "minimal-static")]
-    let cert_info = None;
-
-    // Determine TLS protocol version
-    let version = conn.protocol_version()
-        .map(|v| format!("{:?}", v))
-        .unwrap_or_else(|| "No TLS Version".to_string());
-
-    debug!("[TLS Scan:{}:{}] Connection completed. Version: {}, Cert Subject: {}",
-        target_ip, port, version, cert_info.as_ref().map_or("N/A", |c| c.subject.as_str()));
-    // Status is Open because TCP connected, regardless of TLS handshake success
-    Ok((PortStatus::Open, cert_info, version))
+    
+    // Create standard (non-async) stream from tokio stream for rustls
+    let mut tcp_stream = tcp_stream.into_std()?;
+    
+    // Set a read timeout on the underlying TCP stream
+    tcp_stream.set_read_timeout(Some(timeout_duration))?;
+    tcp_stream.set_write_timeout(Some(timeout_duration))?;
+    
+    // Start TLS handshake with better error classification
+    let handshake_result = async {
+        // Replace the unused buffer variable with an underscore prefix
+        let _buffer = [0u8; 8192];
+        loop {
+            // Check if connection needs to read
+            if tls_conn.wants_read() {
+                match tls_conn.read_tls(&mut tcp_stream) {
+                    Ok(0) => {
+                        // EOF - connection closed by remote
+                        debug!("[{}:{}] TLS connection closed by remote during handshake", target_ip, port);
+                        break;
+                    },
+                    Ok(_) => {
+                        // Successfully read data
+                        if let Err(e) = tls_conn.process_new_packets() {
+                            debug!("[{}:{}] TLS packet processing error: {}", target_ip, port, e);
+                            return Err(anyhow!("TLS error: {}", e));
+                        }
+                    },
+                    Err(e) => {
+                        debug!("[{}:{}] TLS read error: {}", target_ip, port, e);
+                        return Err(anyhow!("TLS read error: {}", e));
+                    }
+                }
+            }
+            
+            // Check if connection needs to write
+            if tls_conn.wants_write() {
+                match tls_conn.write_tls(&mut tcp_stream) {
+                    Ok(_) => {
+                        // Successfully wrote data
+                    },
+        Err(e) => {
+                        debug!("[{}:{}] TLS write error: {}", target_ip, port, e);
+                        return Err(anyhow!("TLS write error: {}", e));
+                    }
+                }
+            }
+            
+            // Check handshake status
+            if tls_conn.is_handshaking() {
+                // Still ongoing, continue
+                continue;
+            } else {
+                // Handshake complete
+                debug!("[{}:{}] TLS handshake completed", target_ip, port);
+                break;
+            }
+        }
+        
+        Ok(())
+    };
+    
+    // Apply timeout to handshake operation
+    let handshake_result = timeout(timeout_duration, handshake_result).await;
+    
+    match handshake_result {
+        Ok(Ok(_)) => {
+            // Handshake successful, obtain certificate info
+            let cert_info = parse_certificate_chain(&tls_conn);
+            
+            // Gather additional TLS details for fingerprinting
+            let protocol_version = format!("{:?}", tls_conn.protocol_version());
+            let cipher_suite = format!("{:?}", tls_conn.negotiated_cipher_suite());
+            
+            // Extra information about the connection
+            let server_info = format!(
+                "TLS Handshake Successful | Version: {} | Cipher: {}",
+                protocol_version, cipher_suite
+            );
+            
+            debug!("[{}:{}] SSL/TLS scan successful: {}", target_ip, port, server_info);
+            Ok((PortStatus::Open, cert_info, server_info))
+        },
+        Ok(Err(e)) => {
+            // TLS handshake failed with error
+            let error_message = e.to_string();
+            
+            // Analyze specific TLS errors to determine port status
+            if error_message.contains("certificate") || error_message.contains("verify") {
+                // Certificate verification errors typically mean a successful connection
+                // to a server with an invalid or self-signed certificate
+                debug!("[{}:{}] Certificate validation failed but connection was established", target_ip, port);
+                Ok((PortStatus::Open, None, format!("SSL/TLS Error: {}", error_message)))
+            } else if error_message.contains("protocol") || error_message.contains("handshake") {
+                // Protocol errors often indicate an open port running a non-TLS service
+                debug!("[{}:{}] Protocol error indicates non-TLS service", target_ip, port);
+                Ok((PortStatus::Open, None, format!("Non-TLS Service: {}", error_message)))
+            } else {
+                // Generic error - port is likely open but running something unexpected
+                debug!("[{}:{}] TLS handshake failed: {}", target_ip, port, error_message);
+                Ok((PortStatus::Open, None, format!("TLS Error: {}", error_message)))
+            }
+        },
+        Err(_) => {
+            // Timeout during handshake - could be heavily filtered or slow
+            debug!("[{}:{}] TLS handshake timeout", target_ip, port);
+            Ok((PortStatus::OpenFiltered, None, "TLS handshake timeout".to_string()))
+        }
+    }
 }
 
+// Improved function to parse the certificate chain
+fn parse_certificate_chain(tls_conn: &ClientConnection) -> Option<CertificateInfo> {
+    // Get the server certificate chain, if available
+    if let Some(certs) = tls_conn.peer_certificates() {
+        if let Some(cert_der) = certs.first() {
+            return parse_certificate(cert_der);
+        }
+    }
+    None
+}
 
 /// Parse an X.509 certificate and extract information
 /// (remains unchanged)
@@ -793,6 +893,27 @@ fn parse_certificate(cert_der: &[u8]) -> Option<CertificateInfo> {
     }
 }
 
+#[cfg(feature = "minimal-static")]
+fn parse_certificate(cert_der: &[u8]) -> Option<CertificateInfo> {
+    // Minimal implementation for when x509-parser is not available
+    let mut hasher = Sha256::new();
+    hasher.update(cert_der);
+    let fingerprint = format!("{:x}", hasher.finalize());
+    
+    Some(CertificateInfo {
+        subject: "Unknown (minimal build)".to_string(),
+        issuer: "Unknown (minimal build)".to_string(),
+        not_before: "Unknown".to_string(),
+        not_after: "Unknown".to_string(),
+        serial_number: "Unknown".to_string(),
+        signature_algorithm: "Unknown".to_string(),
+        version: 0,
+        fingerprint,
+        alt_names: vec![],
+        public_key_bits: None,
+        key_algorithm: None,
+    })
+}
 
 /// UDP scan implementation
 /// (remains unchanged, uses standard sockets)
@@ -1165,10 +1286,50 @@ pub async fn mimic_scan_with_payload(
     }
 }
 
-// Placeholder comments for unimplemented scans
-// pub async fn frag_scan(...) -> Result<PortStatus> { Err(anyhow!("Frag scan not implemented")) }
-// pub async fn dns_tunnel_scan(...) -> Result<PortStatus> { Err(anyhow!("DNS Tunnel scan not implemented")) }
-// pub async fn icmp_tunnel_scan(...) -> Result<PortStatus> { Err(anyhow!("ICMP Tunnel scan not implemented")) }
+/// Perform a DNS tunnel scan to a target port
+/// This scan tunnels traffic through DNS queries to bypass restrictive firewalls
+pub async fn dns_tunnel_scan(
+    target_ip: IpAddr,
+    port: u16,
+    _local_ip: Option<IpAddr>,
+    _use_ipv6: bool,
+    timeout_duration: Duration,
+    dns_server: Option<IpAddr>,
+    lookup_domain: Option<String>,
+) -> Result<PortStatus> {
+    // Use the tunnel module implementation
+    let domain = lookup_domain.as_deref();
+    crate::tunnel::tunnel_scan(
+        target_ip,
+        port,
+        _local_ip,
+        crate::tunnel::TunnelType::Dns,
+        timeout_duration,
+        domain,
+        dns_server
+    ).await
+}
+
+/// Perform an ICMP tunnel scan to a target port
+/// This scan tunnels traffic through ICMP echo packets to bypass restrictive firewalls
+pub async fn icmp_tunnel_scan(
+    target_ip: IpAddr,
+    port: u16,
+    local_ip: Option<IpAddr>,
+    _use_ipv6: bool,
+    timeout_duration: Duration,
+) -> Result<PortStatus> {
+    // Use the tunnel module implementation
+    crate::tunnel::tunnel_scan(
+        target_ip,
+        port,
+        local_ip,
+        crate::tunnel::TunnelType::Icmp,
+        timeout_duration,
+        None,
+        None
+    ).await
+}
 
 /// XMAS scan implementation (using raw sockets)
 /// Sends packet with FIN, PSH, URG flags set.

@@ -170,4 +170,149 @@ Common issues:
 - **"Docker not found"**: Install Docker or specify a different target IP
 - **"Permission denied"**: Run with sudo/root privileges
 - **"Scan failed"**: Check that the Docker test environment is running
-- **"Output file not created"**: Check filesystem permissions 
+- **"Output file not created"**: Check filesystem permissions
+
+# Testing Quantum Scanner
+
+This document provides instructions for testing Quantum Scanner, including the full nDPI protocol detection capabilities.
+
+## Prerequisites
+
+Before testing the full nDPI integration, you need to install the nDPI library:
+
+### On Debian/Ubuntu:
+```bash
+sudo apt-get update
+sudo apt-get install libndpi-dev
+```
+
+### On Fedora/CentOS:
+```bash
+sudo dnf install ndpi-devel
+```
+
+### On Arch Linux:
+```bash
+sudo pacman -S ndpi
+```
+
+### On macOS with Homebrew:
+```bash
+brew install ndpi
+```
+
+## Building with Full nDPI Support
+
+To build Quantum Scanner with full nDPI protocol detection:
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/quantum_scanner.git
+cd quantum_scanner
+
+# Build with full nDPI support
+cargo build --release --features full-ndpi
+```
+
+## Testing Protocol Detection
+
+To test the enhanced protocol detection capabilities:
+
+```bash
+# Run with verbose output to see protocol detection
+sudo ./target/release/quantum_scanner -t <target_ip> --ports 1-1000 -v --service-scan
+
+# For detailed protocol information
+sudo ./target/release/quantum_scanner -t <target_ip> --ports 1-1000 -v --service-scan --protocol-details
+```
+
+## Available nDPI Protocols
+
+To see all available nDPI protocols supported by your installation:
+
+```bash
+sudo ./target/release/quantum_scanner --list-protocols
+```
+
+This will output the complete list of protocols that your nDPI library version supports.
+
+## Testing Individual Protocol Detection
+
+You can test detection of specific protocols:
+
+### HTTP/HTTPS:
+```bash
+sudo ./target/release/quantum_scanner -t example.com --ports 80,443 -v --service-scan
+```
+
+### SSH:
+```bash
+sudo ./target/release/quantum_scanner -t <target_ip> --ports 22 -v --service-scan
+```
+
+### Database Services:
+```bash
+sudo ./target/release/quantum_scanner -t <target_ip> --ports 3306,5432,1433,27017,6379 -v --service-scan
+```
+
+## Comparing Results
+
+To compare the results of the full nDPI detection versus the minimal detection:
+
+1. Run a scan with full nDPI enabled:
+```bash
+sudo ./target/release/quantum_scanner -t <target_ip> --ports 1-1000 -v --service-scan > full_ndpi_results.txt
+```
+
+2. Run the same scan with minimal detection:
+```bash
+sudo ./target/release/quantum_scanner -t <target_ip> --ports 1-1000 -v --service-scan --minimal > minimal_results.txt
+```
+
+3. Compare the results:
+```bash
+diff full_ndpi_results.txt minimal_results.txt
+```
+
+## Troubleshooting
+
+If you encounter issues with nDPI detection:
+
+1. Verify the nDPI library is properly installed:
+```bash
+pkg-config --modversion libndpi
+```
+
+2. Check if the scanner can find the nDPI library:
+```bash
+RUST_LOG=debug ./target/release/quantum_scanner --version
+```
+
+3. If using a custom nDPI installation location, specify it when building:
+```bash
+RUSTFLAGS="-L /path/to/ndpi/lib -I /path/to/ndpi/include" cargo build --release --features full-ndpi
+```
+
+## Expected Output
+
+When full nDPI protocol detection is working correctly, you should see output similar to this:
+
+```
+Port 80/tcp: open
+  Service: http
+  Banner: Apache/2.4.41 (Ubuntu)
+  Protocol family: Web
+  Encrypted: No
+  Additional details: HTTP/1.1 website
+  Risk score: 0
+
+Port 443/tcp: open
+  Service: https
+  Banner: nginx/1.18.0
+  Protocol family: Web
+  Encrypted: Yes
+  Additional details: TLS v1.3, JA3: a0e9f5d64349fb13191bc781f81f42e1
+  Risk score: 0
+```
+
+The extended protocol information (protocol family, encryption status, risk score) is available only with the full nDPI integration. 

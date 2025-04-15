@@ -167,6 +167,7 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
                 for (scan_type, status) in scan_types {
                     // Get reason for this specific scan type if available from tcp_reasons
                     let status_reason = if let Some(reason) = port_result.tcp_reasons.get(scan_type) {
+                        // Always use the scan-specific reason from tcp_reasons when available
                         format!(" (Reason: {})", reason)
                     } else if let Some(reason) = &port_result.reason {
                         // Fall back to the general reason if no specific reason exists
@@ -302,6 +303,7 @@ fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<(
         for (scan_type, status) in scan_types {
             // Get reason for this specific scan type if available from tcp_reasons
             let status_reason = if let Some(reason) = result.tcp_reasons.get(scan_type) {
+                // Always use the scan-specific reason from tcp_reasons when available
                 format!(" (Reason: {})", reason)
             } else if let Some(reason) = &result.reason {
                 // Fall back to the general reason if no specific reason exists
@@ -439,7 +441,6 @@ pub fn print_results(results: &ScanResults, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn print_port_summary(port: u16, result: &PortResult) {
     // Determine the state (open, filtered, etc)
     let state = if result.tcp_states.values().any(|s| *s == PortStatus::Open) {
@@ -487,7 +488,7 @@ fn print_port_summary(port: u16, result: &PortResult) {
         None => "-".to_string()
     };
     
-    // Print the summary line
+    // Print the summary line with scan-specific reasons
     println!("{:<7} {:<6} {:<9} {:<16} {}", 
         style(port).yellow().bold(),
         style(state).green(),
@@ -526,167 +527,73 @@ fn print_detailed_results(results: &ScanResults) -> Result<()> {
                 scan_types.sort_by(|a, b| a.0.cmp(b.0));
                 
                 for (scan_type, status) in scan_types {
-                    // Get reason for this specific scan type if available from tcp_reasons
+                    // Always get reason for this specific scan type from tcp_reasons when available
                     let status_reason = if let Some(reason) = result.tcp_reasons.get(scan_type) {
-                        format!(" (Reason: {})", reason)
+                        // Use the scan-specific reason from tcp_reasons when available
+                        format!(" (Reason: {})", style(reason).yellow())
                     } else if let Some(reason) = &result.reason {
                         // Fall back to the general reason if no specific reason exists
-                        format!(" (Reason: {})", reason)
+                        format!(" (Reason: {})", style(reason).yellow())
                     } else {
                         String::new()
                     };
                     
-                    println!("    - {} scan: {}{}", scan_type, status, style(&status_reason).yellow());
+                    println!("    - {} scan: {}{}", style(scan_type).cyan(), status, status_reason);
                 }
             }
             
             if let Some(udp_state) = &result.udp_state {
                 println!("  UDP: {}", udp_state);
-            }
-            
-            // Print reason if available
-            if let Some(reason) = &result.reason {
-                println!("  Status Reason: {}", style(reason).yellow());
-            }
-            
-            // Print filtering information
-            if let Some(filtering) = &result.filtering {
-                println!("  Filtering: {}", filtering);
-            }
-            
-            // Print banner with proper formatting
-            if let Some(banner) = &result.banner {
-                println!("  {}", style("Banner:").underlined());
-                // Split the banner into lines and print each with proper indentation
-                for (i, line) in banner.lines().enumerate() {
-                    if i >= 10 {
-                        println!("    ... (truncated - {} more lines)", banner.lines().count() - 10);
-                        break;
+                
+                // Add UDP-specific reason if available (similar to how tcp_reasons works)
+                if let Some(reason) = &result.reason {
+                    if result.tcp_states.is_empty() { // Only show if this is primarily a UDP scan
+                        println!("    UDP Reason: {}", style(reason).yellow());
                     }
+                }
+            }
+            
+            // Print banner information
+            if let Some(banner) = &result.banner {
+                let mut lines: Vec<&str> = banner.lines().collect();
+                let display_lines = if lines.len() > 5 {
+                    // If there are more than 5 lines, show first 3 and last 2
+                    let first_lines = &lines[0..3];
+                    let last_lines = &lines[lines.len() - 2..];
+                    
+                    let mut result = first_lines.to_vec();
+                    result.push("...");
+                    result.extend_from_slice(last_lines);
+                    result
+                } else {
+                    lines
+                };
+                
+                println!("  Banner:");
+                for line in display_lines {
                     println!("    {}", line);
                 }
             }
             
-            // Print detailed service information
-            if let Some(details) = &result.service_details {
-                println!("  Service Details:");
-                for (key, value) in details {
-                    println!("    - {}: {}", key, value);
-                }
-            }
-            
-            // Print security posture assessment
-            if let Some(posture) = &result.security_posture {
-                println!("  Security Assessment:");
-                for item in posture.split(';') {
-                    if !item.trim().is_empty() {
-                        println!("    - {}", item.trim());
-                    }
-                }
-            }
-            
-            // Print timing analysis
-            if let Some(timing) = &result.timing_analysis {
-                println!("  Timing Analysis: {}", timing);
-            }
-            
-            // Print detected anomalies
-            if !result.anomalies.is_empty() {
-                println!("  Detected Anomalies:");
-                for anomaly in &result.anomalies {
-                    println!("    - {}", anomaly);
-                }
-            }
-            
-            // Print certificate info if available
-            if let Some(cert) = &result.cert_info {
-                println!("  {}", style("SSL/TLS Certificate:").underlined());
-                println!("    Subject: {}", cert.subject);
-                println!("    Issuer: {}", cert.issuer);
-                println!("    Valid from: {}", cert.not_before);
-                println!("    Valid until: {}", cert.not_after);
-                println!("    Signature Algorithm: {}", cert.signature_algorithm);
-                
-                if let Some(bits) = cert.public_key_bits {
-                    let strength = if bits < 2048 { 
-                        style("weak").red() 
-                    } else { 
-                        style("strong").green() 
-                    };
-                    println!("    Key strength: {} bits ({})", bits, strength);
-                }
-                
-                if !cert.alt_names.is_empty() {
-                    println!("    Alternative Names:");
-                    for (i, name) in cert.alt_names.iter().enumerate() {
-                        if i >= 5 {
-                            println!("      ... and {} more", cert.alt_names.len() - 5);
-                            break;
-                        }
-                        println!("      - {}", name);
-                    }
-                }
-            }
-            
-            // Print vulnerabilities if found
+            // Print vulnerabilities if any found
             if !result.vulns.is_empty() {
-                println!("  {}", style("Potential Vulnerabilities:").red().bold());
+                println!("\nPotential Vulnerabilities:");
                 for vuln in &result.vulns {
-                    println!("    - {} ({})", style(&vuln.id).red().bold(), vuln.severity);
-                    println!("      Description: {}", vuln.description);
+                    println!("- {} ({})", style(&vuln.id).red().bold(), vuln.severity);
+                    println!("  Description: {}", vuln.description);
                 }
             }
-            
-            println!("{}", style("-------------------------").dim());
-        }
-    }
-    
-    // Print OS detection info if available
-    if let Some(os_summary) = &results.os_summary {
-        println!("\n{}", style("OS Detection:").cyan().bold());
-        println!("  {}", os_summary);
-    }
-    
-    // Print risk assessment if available
-    if let Some(risk) = &results.risk_assessment {
-        println!("\n{}", style("Risk Assessment:").cyan().bold());
-        println!("  {}", risk);
-    }
-    
-    // Print service categories if available
-    if let Some(categories) = &results.service_categories {
-        println!("\n{}", style("Service Categories:").cyan().bold());
-        for (category, ports) in categories {
-            let ports_str = ports.iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!("  - {}: {}", style(category).yellow(), ports_str);
         }
     }
     
     Ok(())
 }
 
-#[allow(dead_code)]
-fn format_duration(seconds: f64) -> String {
-    if seconds < 0.001 {
-        format!("{:.2} μs", seconds * 1_000_000.0)
-    } else if seconds < 1.0 {
-        format!("{:.2} ms", seconds * 1_000.0)
-    } else if seconds < 60.0 {
-        format!("{:.2} sec", seconds)
-    } else {
-        let minutes = (seconds / 60.0).floor();
-        let secs = seconds - (minutes * 60.0);
-        format!("{}m {:.2}s", minutes as u32, secs)
-    }
-}
-
-/// Print just the open ports to stdout
+/// Print a summary of open ports to the terminal
 ///
 /// # Arguments
 /// * `results` - The scan results
+/// * `verbose` - Whether to show verbose information
 ///
 /// # Returns
 /// * `Result<()>` - Success or error
@@ -768,6 +675,7 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
         for (scan_type, status) in scan_types {
             // Get reason for this specific scan type if available from tcp_reasons
             let status_reason = if let Some(reason) = port_result.tcp_reasons.get(scan_type) {
+                // Always use the scan-specific reason from tcp_reasons when available
                 format!(" (Reason: {})", reason)
             } else if let Some(reason) = &port_result.reason {
                 // Fall back to the general reason if no specific reason exists

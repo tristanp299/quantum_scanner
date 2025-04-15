@@ -507,3 +507,83 @@ Refer to the `LICENSE` file for distribution and usage rights.
 ## **Disclaimer: Use Responsibly**
 
 **This tool is intended solely for authorized security testing and educational purposes.** Using Quantum Scanner against systems without explicit, written permission from the system owner is illegal and unethical. The developers assume no liability and are not responsible for any misuse or damage caused by this tool. **Always obtain proper authorization before conducting any scanning activity.**
+
+## nDPI Protocol Detection
+
+Quantum Scanner includes comprehensive protocol detection using the nDPI (Deep Packet Inspection) library. This allows it to identify over 280 different protocols and applications based on their network traffic patterns.
+
+### Installing nDPI
+
+To use the full protocol detection capabilities, you need to install the nDPI library on your system:
+
+#### Debian/Ubuntu:
+```bash
+sudo apt-get update
+sudo apt-get install libndpi-dev
+```
+
+#### Fedora/CentOS:
+```bash
+sudo dnf install ndpi-devel
+```
+
+#### Arch Linux:
+```bash
+sudo pacman -S ndpi
+```
+
+#### macOS with Homebrew:
+```bash
+brew install ndpi
+```
+
+#### From Source (if packages unavailable):
+```bash
+git clone https://github.com/ntop/nDPI.git
+cd nDPI
+./autogen.sh
+./configure
+make
+sudo make install
+sudo ldconfig
+```
+
+### Building with nDPI Support
+
+The scanner is configured to automatically use nDPI when available:
+
+```bash
+# Build with default options (includes full nDPI support)
+cargo build --release
+
+# Explicitly enable full protocol detection
+cargo build --release --features full-ndpi
+
+# Build without nDPI support
+cargo build --release --features minimal-static --no-default-features
+```
+
+### Using Protocol Detection
+
+When scanning with service detection enabled, nDPI will automatically be used:
+
+```bash
+# Basic scan with service detection
+sudo ./target/release/quantum_scanner -t example.com --ports 1-1000 --service-scan
+
+# Verbose output to see protocol details
+sudo ./target/release/quantum_scanner -t example.com --ports 80,443,22,8080 -v --service-scan
+
+# List all supported protocols
+sudo ./target/release/quantum_scanner --list-protocols
+```
+
+### Protocol Detection Benefits
+
+Using the nDPI integration provides several key advantages:
+
+1. **Comprehensive Protocol Support**: Detects over 280 protocols, significantly more than hardcoded patterns
+2. **Automatic Updates**: Benefits from updates to the system nDPI library without code changes
+3. **Enhanced Metadata**: Extracts application-specific details like hostnames, certificates, and user agents
+4. **Encryption Detection**: Accurately identifies encrypted protocols and tunneled services
+5. **Risk Assessment**: Newer nDPI versions provide risk scoring for potentially malicious traffic

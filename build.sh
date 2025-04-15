@@ -29,6 +29,7 @@ INSTALL_DEPS=false       # Whether to install dependencies
 FIX_DOCKER=false         # Whether to fix Docker certificates
 TOOLCHAIN="stable"       # Default Rust toolchain to use
 FORCE_REMOVE_SYSTEM_RUST=false # Whether to force remove system Rust
+INSTALL_NDPI=false       # Whether to install nDPI if not already present
 
 # ======================================================================
 # FUNCTIONS
@@ -63,6 +64,7 @@ show_help() {
     echo "  --clean               Clean build artifacts before building"
     echo "  --insecure            Bypass TLS certificate verification (for proxy environments)"
     echo "  --install-deps        Install all required dependencies"
+    echo "  --install-ndpi        Install nDPI library if not already present"
     echo "  --fix-docker          Fix Docker certificate issues (run as root)"
     echo "  --nightly             Use nightly toolchain instead of stable"
     echo "  --beta                Use beta toolchain instead of stable"
@@ -74,6 +76,7 @@ show_help() {
     echo "  $0 --static           Build 100% static binary with Docker"
     echo "  $0 --insecure         Build with TLS verification disabled (for corporate proxies)"
     echo "  $0 --install-deps     Install dependencies and then build"
+    echo "  $0 --install-ndpi     Install nDPI library if not present"
     echo "  $0 --fix-docker       Fix Docker certificate issues (for Kali Linux)"
     echo ""
 }
@@ -119,6 +122,11 @@ parse_args() {
                 ;;
             --fix-docker)
                 FIX_DOCKER=true
+                shift
+                ;;
+            --install-ndpi)
+                INSTALL_NDPI=true
+                echo -e "${YELLOW}[!] Will install nDPI if not already present${NC}"
                 shift
                 ;;
             --nightly)
@@ -436,6 +444,127 @@ fix_docker_certs() {
     return 0
 }
 
+# Function to check and install nDPI library
+check_install_ndpi() {
+    echo -e "${BLUE}[*] Checking for nDPI library...${NC}"
+    
+    NDPI_INSTALLED=false
+    
+    # Try to check with pkg-config first
+    if command -v pkg-config &> /dev/null; then
+        if pkg-config --exists libndpi; then
+            NDPI_VERSION=$(pkg-config --modversion libndpi 2>/dev/null)
+            echo -e "${GREEN}[+] nDPI library found (version ${NDPI_VERSION})${NC}"
+            NDPI_INSTALLED=true
+            return 0
+        fi
+    fi
+    
+    # Manual library check as fallback
+    if [ -e "/usr/lib/libndpi.so" ] || [ -e "/usr/local/lib/libndpi.so" ] || [ -e "/usr/lib64/libndpi.so" ]; then
+        echo -e "${GREEN}[+] nDPI library found${NC}"
+        NDPI_INSTALLED=true
+        return 0
+    fi
+    
+    # Not found, offer to install
+    echo -e "${YELLOW}[!] nDPI library not found${NC}"
+    echo -e "${BLUE}[*] Installing nDPI for full protocol detection support...${NC}"
+    
+    # Detect OS type for installation
+    if [ -f /etc/debian_version ]; then
+        # Debian/Ubuntu
+        echo -e "${BLUE}[*] Detected Debian/Ubuntu-based system${NC}"
+        sudo apt-get update -qq
+        # Try package installation first
+        if sudo apt-get install -y libndpi-dev; then
+            echo -e "${GREEN}[+] nDPI installed successfully from package${NC}"
+            NDPI_INSTALLED=true
+            return 0
+        else
+            echo -e "${YELLOW}[!] Package installation failed, trying from source${NC}"
+        fi
+    elif [ -f /etc/redhat-release ]; then
+        # RHEL/Fedora
+        echo -e "${BLUE}[*] Detected Red Hat/Fedora-based system${NC}"
+        # Try package installation first
+        if sudo dnf install -y ndpi-devel; then
+            echo -e "${GREEN}[+] nDPI installed successfully from package${NC}"
+            NDPI_INSTALLED=true
+            return 0
+        else
+            echo -e "${YELLOW}[!] Package installation failed, trying from source${NC}"
+        fi
+    elif [ -f /etc/arch-release ]; then
+        # Arch Linux
+        echo -e "${BLUE}[*] Detected Arch Linux-based system${NC}"
+        # Try package installation first
+        if sudo pacman -S --needed --noconfirm ndpi; then
+            echo -e "${GREEN}[+] nDPI installed successfully from package${NC}"
+            NDPI_INSTALLED=true
+            return 0
+        else
+            echo -e "${YELLOW}[!] Package installation failed, trying from source${NC}"
+        fi
+    else
+        echo -e "${YELLOW}[!] Unknown distribution, trying to install from source${NC}"
+    fi
+    
+    # Source installation as fallback
+    echo -e "${BLUE}[*] Installing nDPI from source...${NC}"
+    
+    # Install build dependencies
+    echo -e "${BLUE}[*] Installing build dependencies...${NC}"
+    if [ -f /etc/debian_version ]; then
+        sudo apt-get install -y build-essential autoconf automake libtool libpcap-dev git
+    elif [ -f /etc/redhat-release ]; then
+        sudo dnf install -y gcc make autoconf automake libtool libpcap-devel git
+    elif [ -f /etc/arch-release ]; then
+        sudo pacman -S --needed --noconfirm base-devel libpcap git
+    else
+        echo -e "${YELLOW}[!] Please install autoconf, automake, libtool, and libpcap-dev manually${NC}"
+    fi
+    
+    # Create temporary directory for build
+    TEMP_DIR=$(mktemp -d)
+    pushd "$TEMP_DIR" >/dev/null
+    
+    # Clone and build nDPI
+    echo -e "${BLUE}[*] Cloning nDPI repository...${NC}"
+    if git clone --depth 1 https://github.com/ntop/nDPI.git; then
+        cd nDPI
+        echo -e "${BLUE}[*] Configuring nDPI...${NC}"
+        if ./autogen.sh && ./configure; then
+            echo -e "${BLUE}[*] Building nDPI...${NC}"
+            if make; then
+                echo -e "${BLUE}[*] Installing nDPI...${NC}"
+                if sudo make install; then
+                    # Run ldconfig to update library cache
+                    sudo ldconfig
+                    echo -e "${GREEN}[+] nDPI installed successfully from source${NC}"
+                    NDPI_INSTALLED=true
+                    # Clean up
+                    popd >/dev/null
+                    rm -rf "$TEMP_DIR"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+    
+    # Clean up on failure
+    popd >/dev/null
+    rm -rf "$TEMP_DIR"
+    
+    echo -e "${RED}[!] Failed to install nDPI. Protocol detection will be limited.${NC}"
+    echo -e "${RED}[!] You can retry by installing manually:${NC}"
+    echo -e "${RED}    Debian/Ubuntu: sudo apt-get install libndpi-dev${NC}"
+    echo -e "${RED}    Fedora/RHEL: sudo dnf install ndpi-devel${NC}"
+    echo -e "${RED}    Arch Linux: sudo pacman -S ndpi${NC}"
+    
+    return 1
+}
+
 # Function to install dependencies
 install_dependencies() {
     echo -e "${BLUE}[*] Installing dependencies for Quantum Scanner...${NC}"
@@ -558,6 +687,9 @@ install_dependencies() {
         echo "  - upx (for binary compression)"
         return 1
     fi
+    
+    # Check and install nDPI if not present
+    check_install_ndpi
     
     echo -e "${GREEN}[+] Dependencies installed successfully!${NC}"
     return 0
@@ -854,7 +986,7 @@ main() {
     if [ "$FIX_DOCKER" = true ]; then
         fix_docker_certs
         # Exit if we were only fixing Docker
-        if [ $? -eq 0 ] && [ "$INSTALL_DEPS" != true ]; then
+        if [ $? -eq 0 ] && [ "$INSTALL_DEPS" != true ] && [ "$INSTALL_NDPI" != true ]; then
             exit 0
         fi
     fi
@@ -865,6 +997,26 @@ main() {
         if [ $? -ne 0 ]; then
             echo -e "${RED}[!] Failed to install dependencies${NC}"
             exit 1
+        fi
+    fi
+    
+    # Check for nDPI or install if requested
+    if [ "$INSTALL_NDPI" = true ]; then
+        check_install_ndpi
+        if [ $? -ne 0 ]; then
+            echo -e "${YELLOW}[!] Failed to install nDPI automatically${NC}"
+            echo -e "${YELLOW}[!] Will continue build, but protocol detection capabilities will be limited${NC}"
+        fi
+    else
+        # Just check nDPI silently and inform user if not found
+        NDPI_INSTALLED=false
+        if command -v pkg-config &> /dev/null && pkg-config --exists libndpi; then
+            echo -e "${GREEN}[+] nDPI library found, full protocol detection will be available${NC}"
+        elif [ -e "/usr/lib/libndpi.so" ] || [ -e "/usr/local/lib/libndpi.so" ] || [ -e "/usr/lib64/libndpi.so" ]; then
+            echo -e "${GREEN}[+] nDPI library found, full protocol detection will be available${NC}"
+        else
+            echo -e "${YELLOW}[!] nDPI library not found. Protocol detection capabilities will be limited.${NC}"
+            echo -e "${YELLOW}[!] Use '--install-ndpi' to automatically install nDPI support.${NC}"
         fi
     fi
     
@@ -912,6 +1064,14 @@ main() {
                 if [[ "$LDD_OUTPUT" == *"not a dynamic executable"* ]]; then
                     echo -e "${GREEN}[+] Build verification: Binary is statically linked${NC}"
                 fi
+            fi
+            
+            # Final note about nDPI support
+            if [ "$NDPI_INSTALLED" = true ]; then
+                echo -e "${GREEN}[+] nDPI detection support: ENABLED${NC}"
+            else
+                echo -e "${YELLOW}[!] nDPI detection support: LIMITED${NC}"
+                echo -e "${YELLOW}[!] Use '--install-ndpi' flag next time to enable full protocol detection${NC}"
             fi
         else
             echo -e "${RED}[!] Build verification failed: Binary is missing or not executable${NC}"

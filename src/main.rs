@@ -10,14 +10,11 @@ use std::net::IpAddr;
 use serde_json;
 use anyhow::{Result, anyhow};
 use tokio::time::sleep;
-use tokio::sync::Mutex;
-// use crate::techniques::{syn_scan, ssl_scan, udp_scan, ack_scan, fin_scan, xmas_scan, null_scan, window_scan, tls_echo_scan, mimic_scan_with_payload, frag_scan};
-use crate::utils::{find_local_ipv4, MemoryLogBuffer};
+use crate::utils::MemoryLogBuffer;
 use crate::models::{ScanType, PortRanges, TopPorts, requires_raw_sockets};
 
 mod banner;
 mod http_analyzer;
-mod minimal;
 mod ml_service_ident;
 mod models;
 mod output;
@@ -155,10 +152,6 @@ struct Args {
     /// Scan techniques to use (comma-separated)
     #[clap(short, long, default_value = "syn", group = "scan_execution", help_heading = "SCAN METHODS", long_help = "Available techniques: syn, ssl, udp, ack, fin, xmas, null, window, tls-echo, mimic, frag, dns-tunnel, icmp-tunnel\nExamples: -s syn,ssl,udp or -s syn -s ssl\nNote: Do not include spaces after commas\n\n⚠️ OPSEC WARNING: The ssl, tls-echo, and mimic scan types use full TCP connections that are easily logged by target systems. For stealth-critical operations, prefer using only the raw socket scan types like syn, fin, xmas, null, etc.")]
     scan_types_str: String,
-
-    /// Enable ML-based service identification for ambiguous services
-    #[clap(long = "ml-ident", default_value_t = true, group = "service_detection", help_heading = "SERVICE DETECTION")]
-    ml_identification: bool,
 
     // ========== EVASION OPTIONS ==========
 
@@ -1003,7 +996,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Parse command-line arguments
     let args = Args::parse();
-    let colors = Colors::new(args.color);
+    let _colors = Colors::new(args.color);
 
     // --- Special Mode: Fix Redacted Log File --- 
     // If --fix-log-file is provided, perform only that action and exit.
@@ -1044,7 +1037,10 @@ async fn main() -> Result<(), anyhow::Error> {
         args.encrypt_logs, 
         args._log_password.as_deref() // Pass optional password
     ) { 
-        Ok(buffer_opt) => Arc::new(buffer_opt), // Wrap Option<MemoryLogBuffer> in Arc
+        Ok(buffer_opt) => {
+            // Convert Option<MemoryLogBuffer> to Option<Arc<parking_lot::Mutex<MemoryLogBuffer>>>
+            buffer_opt.map(|buffer| Arc::new(parking_lot::Mutex::new(buffer)))
+        },
         Err(e) => {
             // Use default logger initialized earlier to show this error
             error!("Failed to initialize logging: {}", e);
@@ -1059,43 +1055,31 @@ async fn main() -> Result<(), anyhow::Error> {
         println!("{}", banner::display_banner(false));
     }
 
-    // Parse scan types
-    let scan_types = match parse_scan_types(&args.scan_types_str) {
-        Ok(types) => types,
-        Err(e) => {
-            error!("Error parsing scan types: {}", e);
-            process::exit(1);
-        }
-    };
-    info!("Selected scan types: {:?}", scan_types);
-
-    // Check if raw sockets are needed
+    // Parse scan types from args.scan_types_str and check for needed privileges
+    let scan_types = parse_scan_types(&args.scan_types_str)?;
     let needs_raw_sockets = requires_raw_sockets(&scan_types);
-    let mut local_ip_v4: Option<std::net::Ipv4Addr> = None; // Initialize as None
-
-    // If raw sockets needed, check privileges and get local IP
-    if needs_raw_sockets {
-        info!("Selected scan types require raw socket access.");
-        // Perform strict privilege check
-        if !check_privileges(needs_raw_sockets) {
-            error!("{}[!] Error: Raw socket access required but not available. Please run as root or administrator.{}", colors.red, colors.reset);
-            process::exit(1);
+    
+    // Try to detect local IPv4 if raw sockets are needed
+    let local_ip_v4 = if needs_raw_sockets {
+        info!("Raw socket scans selected. Attempting to detect local IPv4 address.");
+        match utils::find_local_ipv4() {
+            Ok(ip) => {
+                info!("Using local IPv4 {} for raw socket scans.", ip);
+                Some(ip)
+            },
+            Err(e) => {
+                warn!("Failed to detect local IPv4 address: {}. Raw socket scans may fail.", e);
+                None
+            }
         }
-        info!("Sufficient privileges detected for raw sockets.");
-
-        // Attempt to find local IPv4 address
-        match find_local_ipv4() {
-             Ok(ip) => {
-                 info!("Using local IPv4 {} for raw socket scans.", ip);
-                 local_ip_v4 = Some(ip);
-             }
-             Err(e) => {
-                 error!("{}[!] Error finding local IPv4 address for raw sockets: {}{}", colors.red, e, colors.reset);
-                 error!("    Raw socket scans (e.g., SYN, FIN) cannot proceed without a source IP.");
-                 error!("    Please ensure you have a properly configured non-loopback network interface.");
-                 process::exit(1);
-             }
-         }
+    } else {
+        None
+    };
+    
+    // Verify user has needed privileges if any scan types require them
+    if needs_raw_sockets && !check_privileges(needs_raw_sockets) {
+        warn!("Scanner may require elevated privileges for the selected scan types.");
+        warn!("If scan fails, try running with sudo or as root/Administrator.");
     }
 
     // Log IPv6 scanning status
@@ -1177,24 +1161,23 @@ async fn main() -> Result<(), anyhow::Error> {
         }
     }
 
-    // Create the scanner instance, passing all necessary configuration
-    let ml_identification = args.ml_identification && cfg!(feature = "ml");
-    let mut scanner = match QuantumScanner::new(
+    // Create scanner instance with all parameters
+    let mut scanner = QuantumScanner::new(
         &args.target,
-        ports_to_scan, // Use the parsed ports
-        scan_types, // Use the parsed scan types
-        local_ip_v4, // Pass the detected local IP (Option<Ipv4Addr>)
+        ports_to_scan,
+        scan_types,
+        local_ip_v4, // Pass the detected local IPv4 address
         args.concurrency,
         args.rate,
         args.evasion,
         args.verbose,
         args.debug,
         args.ipv6,
-        args.timeout, // Scan timeout
-        args.timeout_connect, // Connect timeout
-        args.timeout_banner, // Banner timeout
+        args.timeout,
+        args.timeout_connect,
+        args.timeout_banner,
         &args.mimic_protocol,
-        // Pass fragmentation options
+        // Fragmentation parameters
         args.frag_min_size,
         args.frag_max_size,
         args.frag_min_delay,
@@ -1202,21 +1185,9 @@ async fn main() -> Result<(), anyhow::Error> {
         args.frag_timeout,
         args.frag_first_min_size,
         args.frag_two_frags,
-        // Pass log file path (even if memory only, for context)
         &args.log_file,
-        // Pass ML identification flag
-        ml_identification,
-    ).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!("Failed to initialize scanner: {}", e);
-            // Attempt cleanup before exiting
-            if let Err(cleanup_err) = cleanup_ramdisk(&ramdisk_path) {
-                 warn!("Error during RAM disk cleanup on init failure: {}", cleanup_err);
-            }
-            process::exit(1);
-        }
-    };
+        true, // ml_identification
+    ).await?;
 
     // Set enhanced evasion options if enabled
     if args.enhanced_evasion {
@@ -1233,9 +1204,9 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 
     // Set memory log buffer for scanner if present
-    if let Some(buffer) = &*memory_log_buffer {
-        // Clone the buffer instance to move into the scanner
-        scanner.set_memory_log(Arc::new(Mutex::new(buffer.clone()))); 
+    if let Some(buffer) = &memory_log_buffer {
+        // Pass the memory log buffer to the scanner
+        scanner.set_memory_log(buffer.clone()); 
     }
 
     // Set DNS tunneling options if enabled
