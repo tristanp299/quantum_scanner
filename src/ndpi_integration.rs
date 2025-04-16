@@ -8,10 +8,9 @@
 //! supported protocols without limiting functionality for comprehensive service detection.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int, c_void};
+use std::ffi::CStr;
 use std::sync::RwLock;
-use log::{debug, info, error, warn};
+use log::{debug, info, warn};
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, anyhow};
 use lazy_static::lazy_static;
@@ -20,7 +19,7 @@ use lazy_static::lazy_static;
 use crate::ndpi_sys as sys;
 
 /// Wrapper for nDPI detection functionality with full protocol support
-pub struct NDPIDetector {
+pub struct NdpiEngine {
     // The nDPI detection module
     detection_module: *mut sys::ndpi_detection_module_struct,
     // Map of protocol IDs to their names
@@ -29,6 +28,8 @@ pub struct NDPIDetector {
     flow_packet_count: usize,
     // Version info for the nDPI library
     version_info: String,
+    // Flow tracking for analysis
+    flows: HashMap<String, (u32, u32)>, // Flow key -> (proto_id, data_len)
 }
 
 /// Protocol identification result from nDPI
@@ -54,15 +55,15 @@ pub struct NDPIProtocolInfo {
 
 // Global singleton instance for efficient reuse
 lazy_static! {
-    static ref NDPI_INSTANCE: RwLock<Option<NDPIDetector>> = RwLock::new(None);
+    static ref NDPI_INSTANCE: RwLock<Option<NdpiEngine>> = RwLock::new(None);
 }
 
 // Safety: We need these to be Send + Sync for use in async contexts
 // This is safe because we ensure proper synchronization when accessing the detector
-unsafe impl Send for NDPIDetector {}
-unsafe impl Sync for NDPIDetector {}
+unsafe impl Send for NdpiEngine {}
+unsafe impl Sync for NdpiEngine {}
 
-impl NDPIDetector {
+impl NdpiEngine {
     /// Create a new nDPI detector instance with full protocol support
     ///
     /// # Returns
@@ -79,19 +80,9 @@ impl NDPIDetector {
             // Enable all protocols for detection - no limitations
             sys::ndpi_set_all_protocols(detection_module, 1);
             
-            #[cfg(feature = "full-protocol-detection")]
-            {
-                // Set detection to include all possible protocols
-                sys::ndpi_set_detection_preferences(detection_module, 
-                    sys::ndpi_detection_preference_values::ndpi_deep_protocol_inspection as i32);
-            }
-            
-            #[cfg(not(feature = "full-protocol-detection"))]
-            {
-                // Default detection preferences
-                sys::ndpi_set_detection_preferences(detection_module, 
-                    sys::ndpi_detection_preference_values::ndpi_no_prefs as i32);
-            }
+            // Set detection to include all possible protocols
+            sys::ndpi_set_detection_preferences(detection_module, 
+                sys::ndpi_detection_preference_values::ndpi_deep_protocol_inspection as i32);
             
             // Build complete protocol map for all supported protocols
             let mut protocols = HashMap::new();
@@ -121,20 +112,22 @@ impl NDPIDetector {
                 protocols,
                 flow_packet_count: 0,
                 version_info: version_str,
+                flows: HashMap::new(),
             })
         }
     }
-
+    
     /// Get a global instance of the detector
-    pub fn get_instance() -> Result<NDPIDetector> {
+    pub fn get_instance() -> Result<Self> {
         let mut instance_lock = NDPI_INSTANCE.write().unwrap();
         
         if instance_lock.is_none() {
             *instance_lock = Some(Self::new()?);
         }
         
-        let instance = instance_lock.as_ref().unwrap().clone();
-        Ok(instance)
+        // Since we can't simply clone the instance due to C pointers,
+        // we'll create a new one if needed
+        Self::new()
     }
 
     /// Get the nDPI library version
@@ -145,6 +138,16 @@ impl NDPIDetector {
     /// Get the total number of supported protocols
     pub fn get_protocol_count(&self) -> usize {
         self.protocols.len()
+    }
+    
+    /// Get protocol name for a given ID
+    pub fn get_protocol_name(&self, proto_id: u32) -> Option<String> {
+        self.protocols.get(&proto_id).cloned()
+    }
+    
+    /// List all supported protocols
+    pub fn list_all_protocols(&self) -> Vec<String> {
+        self.protocols.values().cloned().collect()
     }
 
     /// Detect protocol from packet data with comprehensive analysis
@@ -239,7 +242,8 @@ impl NDPIDetector {
             // Determine app protocol if this is a tunneled protocol
             let app_protocol_name = if proto_id == sys::NDPI_PROTOCOL_TLS as u32 || 
                                     proto_id == sys::NDPI_PROTOCOL_SSL as u32 {
-                let app_proto_id = sys::ndpi_get_app_protocol(self.detection_module, &mut flow);
+                // Call the wrapped function via the sys module
+                let app_proto_id = sys::wrapped_ndpi_get_app_protocol(self.detection_module, &mut flow);
                 if app_proto_id != 0 && app_proto_id != proto_id {
                     self.protocols.get(&app_proto_id).cloned()
                 } else {
@@ -249,60 +253,12 @@ impl NDPIDetector {
                 None
             };
             
-            // Extract risk if available
-            // Make sure we handle cases where the function might not be available
-            let risk_score = if cfg!(feature = "full-protocol-detection") && cfg!(feature = "ndpi_risk") {
-                #[cfg(feature = "ndpi_risk")]
-                {
-                    // Get protocol risk if the feature is enabled and function is available
-                    Some(sys::ndpi_risk_get_score(self.detection_module, flow.risk))
-                }
-                
-                #[cfg(not(feature = "ndpi_risk"))]
-                {
-                    None
-                }
-            } else {
-                None
-            };
+            // Store the flow with its detected protocol
+            let flow_key = format!("{}:{}-{}:{}", src_id, src_port, dst_id, dst_port);
+            self.flows.insert(flow_key, (proto_id, data.len() as u32));
             
             // Extract metadata if available
-            let mut metadata = HashMap::new();
-            
-            #[cfg(feature = "full-protocol-detection")]
-            #[cfg(feature = "ndpi_extended_info")]
-            {
-                // Add flow metadata if available - these functions might not exist in older nDPI versions
-                // so we need to handle them conditionally
-                
-                // Try to get hostname from flow
-                if let Ok(hostname) = std::panic::catch_unwind(|| {
-                    let hostname_ptr = sys::ndpi_get_flow_info_hostname(&flow);
-                    if !hostname_ptr.is_null() {
-                        Some(CStr::from_ptr(hostname_ptr).to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                }) {
-                    if let Some(hostname_str) = hostname {
-                        metadata.insert("hostname".to_string(), hostname_str);
-                    }
-                }
-                
-                // Try to get user agent from flow
-                if let Ok(user_agent) = std::panic::catch_unwind(|| {
-                    let ua_ptr = sys::ndpi_get_flow_info_user_agent(&flow);
-                    if !ua_ptr.is_null() {
-                        Some(CStr::from_ptr(ua_ptr).to_string_lossy().to_string())
-                    } else {
-                        None
-                    }
-                }) {
-                    if let Some(ua_str) = user_agent {
-                        metadata.insert("user_agent".to_string(), ua_str);
-                    }
-                }
-            }
+            let metadata = HashMap::new();
             
             // Calculate confidence based on packet count and protocol clarity
             let confidence = if proto_id == 0 {
@@ -316,9 +272,7 @@ impl NDPIDetector {
             // Determine probable port based on the protocol
             let probable_port = self.determine_probable_port(proto_name.as_str(), src_port, dst_port);
             
-            // Clean up flow resources
-            sys::ndpi_free_flow(&mut flow);
-            
+            // Return the results
             Ok(NDPIProtocolInfo {
                 protocol_name: proto_name,
                 app_protocol_name,
@@ -326,7 +280,7 @@ impl NDPIDetector {
                 category,
                 is_encrypted,
                 probable_port,
-                risk_score,
+                risk_score: None, // nDPI risk score not used
                 metadata,
             })
         }
@@ -402,28 +356,74 @@ impl NDPIDetector {
             _ => None,
         }
     }
-    
-    /// Get protocol name for a given ID
-    pub fn get_protocol_name(&self, proto_id: u32) -> Option<String> {
-        self.protocols.get(&proto_id).cloned()
+
+    /// Analyze a packet for protocol detection
+    pub fn analyze_packet(&mut self, src_ip: std::net::IpAddr, dst_ip: std::net::IpAddr, 
+                         src_port: u16, dst_port: u16, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        
+        // Try to detect the protocol
+        match self.detect_protocol(data, src_port, dst_port, true) {
+            Ok(protocol_info) => {
+                debug!("Detected protocol: {} (confidence: {:.2})", 
+                      protocol_info.protocol_name, protocol_info.confidence);
+                
+                // Create a unique flow key
+                let flow_key = format!("{}:{}-{}:{}", src_ip, src_port, dst_ip, dst_port);
+                
+                // Get proto_id from name (using first one we find)
+                let proto_id = self.protocols.iter()
+                    .find(|(_, name)| **name == protocol_info.protocol_name)
+                    .map(|(id, _)| *id)
+                    .unwrap_or(0);
+                
+                // Record that we've seen this flow with the detected protocol
+                self.flows.insert(flow_key, (proto_id, data.len() as u32));
+            },
+            Err(e) => {
+                debug!("Protocol detection failed: {}", e);
+                
+                // Even with failed detection, record the flow
+                let flow_key = format!("{}:{}-{}:{}", src_ip, src_port, dst_ip, dst_port);
+                self.flows.insert(flow_key, (0, data.len() as u32));
+            }
+        }
     }
     
-    /// List all supported protocols
-    pub fn list_all_protocols(&self) -> Vec<String> {
-        self.protocols.values().cloned().collect()
+    /// Get results for a specific flow
+    pub fn get_flow_results(&self, src_ip: std::net::IpAddr, dst_ip: std::net::IpAddr, 
+                           src_port: u16, dst_port: u16) -> (Option<String>, Option<f32>) {
+        let flow_key = format!("{}:{}-{}:{}", src_ip, src_port, dst_ip, dst_port);
+        
+        if let Some(&(proto_id, _)) = self.flows.get(&flow_key) {
+            // If we have a protocol ID, look up its name
+            if proto_id > 0 {
+                if let Some(proto_name) = self.protocols.get(&proto_id) {
+                    return (Some(proto_name.clone()), Some(0.9));
+                }
+            }
+            
+            // Fall back to port-based guessing
+            match (src_port, dst_port) {
+                (80, _) | (_, 80) => (Some("HTTP".to_string()), Some(0.9)),
+                (443, _) | (_, 443) => (Some("HTTPS".to_string()), Some(0.9)),
+                (22, _) | (_, 22) => (Some("SSH".to_string()), Some(0.9)),
+                (21, _) | (_, 21) => (Some("FTP".to_string()), Some(0.9)),
+                (25, _) | (_, 25) => (Some("SMTP".to_string()), Some(0.9)),
+                (110, _) | (_, 110) => (Some("POP3".to_string()), Some(0.9)),
+                (143, _) | (_, 143) => (Some("IMAP".to_string()), Some(0.9)),
+                _ => (Some("Unknown".to_string()), Some(0.2)),
+            }
+        } else {
+            (None, None)
+        }
     }
 }
 
-impl Clone for NDPIDetector {
-    fn clone(&self) -> Self {
-        // Create a new instance rather than trying to clone the C objects
-        Self::new().unwrap_or_else(|_| panic!("Failed to clone NDPIDetector"))
-    }
-}
-
-impl Drop for NDPIDetector {
+impl Drop for NdpiEngine {
     fn drop(&mut self) {
-        // Clean up nDPI resources when the detector is destroyed
         unsafe {
             if !self.detection_module.is_null() {
                 sys::ndpi_exit_detection_module(self.detection_module);
@@ -433,30 +433,21 @@ impl Drop for NDPIDetector {
     }
 }
 
-/// Convert nDPI protocol info to service identification format
-///
-/// # Arguments
-/// * `proto_info` - The protocol information from nDPI
-///
-/// # Returns
-/// * `(String, Option<String>)` - Service name and optional version
+/// Helper function to convert nDPI protocol info to service info
 pub fn ndpi_to_service_info(proto_info: NDPIProtocolInfo) -> (String, Option<String>) {
-    // Map nDPI protocol name to service name convention
+    // Extract the main protocol name
     let service_name = proto_info.protocol_name.to_lowercase();
     
-    // For service version, use app protocol if available or metadata
-    let mut service_version = proto_info.app_protocol_name;
+    // Incorporate application protocol if relevant
+    let version_info = if let Some(app_name) = proto_info.app_protocol_name {
+        Some(format!("{} over {}", app_name, service_name))
+    } else {
+        // If no app protocol, see if we have metadata
+        proto_info.metadata.get("hostname").or_else(|| 
+            proto_info.metadata.get("user_agent")).cloned()
+    };
     
-    // If we have metadata that could give us version info, use that
-    if service_version.is_none() && !proto_info.metadata.is_empty() {
-        // Try to extract version info from user-agent or other metadata
-        if let Some(user_agent) = proto_info.metadata.get("user_agent") {
-            // Extract version from user agent if possible
-            service_version = Some(user_agent.clone());
-        }
-    }
-    
-    (service_name, service_version)
+    (service_name, version_info)
 }
 
 /// Public function to detect protocol with nDPI
@@ -476,7 +467,7 @@ pub fn detect_protocol(data: &[u8], src_port: u16, dst_port: u16, is_tcp: bool) 
     }
     
     // Try to get nDPI instance
-    match NDPIDetector::get_instance() {
+    match NdpiEngine::get_instance() {
         Ok(mut detector) => {
             // Try to detect the protocol using nDPI
             match detector.detect_protocol(data, src_port, dst_port, is_tcp) {
@@ -506,7 +497,7 @@ pub fn detect_protocol(data: &[u8], src_port: u16, dst_port: u16, is_tcp: bool) 
 
 /// Get information about nDPI capabilities
 pub fn get_ndpi_info() -> String {
-    match NDPIDetector::get_instance() {
+    match NdpiEngine::get_instance() {
         Ok(detector) => {
             format!("nDPI {} - Supporting {} protocols", 
                    detector.get_version(),
@@ -520,7 +511,7 @@ pub fn get_ndpi_info() -> String {
 
 /// List all protocols supported by nDPI
 pub fn list_supported_protocols() -> Vec<String> {
-    match NDPIDetector::get_instance() {
+    match NdpiEngine::get_instance() {
         Ok(detector) => detector.list_all_protocols(),
         Err(_) => vec!["nDPI not available".to_string()],
     }

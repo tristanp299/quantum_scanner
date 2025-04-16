@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr/*, Ipv6Addr, SocketAddr*/};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +12,8 @@ use chrono::prelude::Utc;
 use log::{debug, error, info, warn};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use futures::future::join_all;
 // use rand::Rng;
 
@@ -23,6 +25,7 @@ use crate::http_analyzer;
 use crate::service_fingerprints::ServiceFingerprints;
 use crate::ml_service_ident;
 use crate::ml_service_ident::ServiceIdentification;
+use crate::ndpi_integration;
 
 // --- Rate Limiting Imports ---
 use governor::{Quota, RateLimiter, state::direct::NotKeyed, clock::DefaultClock};
@@ -92,6 +95,8 @@ pub struct QuantumScanner {
     protocol_variant: Option<String>,
     /// Enable ML-based service identification
     ml_identification: bool,
+    /// ML service identifier instance (if enabled)
+    ml_identifier: Option<Arc<dyn ServiceIdentification + Send + Sync>>,
     /// DNS Tunneling: Custom server IP
     dns_tunnel_server: Option<IpAddr>,
     /// DNS Tunneling: Custom lookup domain
@@ -104,7 +109,6 @@ pub struct QuantumScanner {
     service_scan_mode: bool,
     /// Optional nDPI engine instance (initialized if enable_ndpi is true)
     ndpi_engine: Option<Arc<Mutex<ndpi_integration::NdpiEngine>>>,
-    // TODO: Add state for rate limiting if max_rate > 0 - Implemented basic delay
 }
 
 impl QuantumScanner {
@@ -261,6 +265,17 @@ impl QuantumScanner {
                    timeout_scan_duration, timeout_connect_duration, timeout_banner_duration);
         }
 
+        // Initialize ML identifier if enabled
+        let ml_service_identifier: Option<Arc<dyn ServiceIdentification + Send + Sync>> = if ml_identification {
+            info!("ML service identification is enabled. Initializing model...");
+            // Use the creation function from the ml_service_ident module.
+            // This function handles model loading internally.
+            Some(Arc::new(ml_service_ident::create_ml_identifier())) 
+        } else {
+            info!("ML service identification is disabled.");
+            None
+        };
+
         // Construct the QuantumScanner instance with all the parameters.
         Ok(Self {
             target: target.to_string(),
@@ -307,7 +322,8 @@ impl QuantumScanner {
             mimic_os: "random".to_string(),
             ttl_jitter: 0,
             protocol_variant: None,
-            ml_identification,
+            ml_identification, // Store the flag
+            ml_identifier: ml_service_identifier, // Store the initialized identifier instance
             dns_tunnel_server: None,
             dns_tunnel_domain: None,
             metrics: None,
@@ -330,27 +346,28 @@ impl QuantumScanner {
         info!("Starting scan for target: {} ({})", self.target, self.target_ip);
 
         // --- nDPI Initialization ---
-        // Initialize nDPI engine if enabled
+        // Initialize nDPI engine if service scan mode is enabled
         if self.service_scan_mode {
-            info!("Initializing nDPI engine...");
+            info!("Initializing nDPI engine for service detection...");
             match ndpi_integration::NdpiEngine::new() {
                 Ok(engine) => {
                     info!("nDPI engine initialized successfully.");
                     self.ndpi_engine = Some(Arc::new(Mutex::new(engine)));
+                    
+                    // OPSEC Warning for nDPI
+                    warn!("⚠️ OPSEC WARNING: Service detection with nDPI is enabled.");
+                    warn!("   This involves brief connection attempts after initial port discovery,");
+                    warn!("   which is less stealthy than raw scans alone.");
+                    warn!("   Use port scan mode (--port-scan/-P) to disable this for maximum stealth.");
                 }
                 Err(e) => {
-                    warn!("Failed to initialize nDPI engine: {}. Disabling nDPI analysis.", e);
-                    self.service_scan_mode = false; // Disable if initialization fails
+                    warn!("Failed to initialize nDPI engine: {}. Service detection will be limited.", e);
+                    self.service_scan_mode = false; // Reduce service scan functionality
                     self.ndpi_engine = None;
                 }
             }
-            // OPSEC Warning for nDPI
-             warn!("⚠️ OPSEC WARNING: Default nDPI analysis is enabled.");
-             warn!("   This involves brief connection attempts after initial port discovery,");
-             warn!("   which is less stealthy than raw scans alone.");
-             warn!("   Use the --no-ndpi flag to disable this behavior for maximum stealth.");
         } else {
-            info!("nDPI analysis is disabled.");
+            info!("nDPI analysis is disabled (port scan mode only).");
             self.ndpi_engine = None;
         }
         // --- End nDPI Initialization ---
@@ -493,12 +510,7 @@ impl QuantumScanner {
         }
         
         // Create service identification components
-        // Use MinimalServiceIdentifier when the ml feature is disabled
-        #[cfg(feature = "ml")]
-        let ml_identifier = Arc::new(ml_service_ident::create_ml_identifier());
-        #[cfg(not(feature = "ml"))]
-        let ml_identifier = Arc::new(ml_service_ident::create_ml_identifier());
-        
+        // ML identifier is now initialized in `new` and cloned above
         let http_analyzer_instance = Arc::new(http_analyzer::HttpAnalyzer::new());
         let fingerprint_db = Arc::new(ServiceFingerprints::new());
 
@@ -542,9 +554,9 @@ impl QuantumScanner {
                 let debug_clone = debug;
                 let _memory_log_clone = memory_log_local.clone();
                 let ml_identification_clone = ml_identification;
+                let ml_identifier_clone = self.ml_identifier.clone();
                 let _timeout_banner_clone = timeout_banner;
                 let http_analyzer_clone = http_analyzer_instance.clone();
-                let ml_identifier_clone = ml_identifier.clone();
                 let fingerprint_db_clone = fingerprint_db.clone();
                 
                 // Spawn a task for banner grabbing and service identification
@@ -559,39 +571,40 @@ impl QuantumScanner {
                     
                     // Banner grabbing - attempt to connect and get service banner
                     // This helps identify services running on the port
-                    let banner_text = match banner::grab_banner(target_ip_clone, port).await {
+                    let banner_bytes = match banner::grab_banner_raw(target_ip_clone, port, timeout_banner).await {
                         Ok(b) => {
-                            let sanitized = sanitize_string(&b);
-                            if debug_clone {
-                                debug!("Banner received for port {}: {}", port, sanitized);
+                            if debug_clone { 
+                                // Log raw bytes safely for debugging
+                                debug!("Raw banner received for port {} ({} bytes)", port, b.len()); 
                             }
-                            if verbose_clone { info!("Banner for port {}: {}", port, sanitized); }
-                            Some(sanitized)
+                            Some(b)
                         },
                         Err(e) => {
-                            if debug_clone {
-                                debug!("Banner grabbing failed for port {}: {}", port, e);
-                            }
+                            if debug_clone { debug!("Banner grabbing failed for port {}: {}", port, e); }
                             if verbose_clone { warn!("Banner grabbing failed for port {}: {}", port, e); }
                             None
                         }
                     };
+                    // Sanitize for logging/storage if needed
+                    let banner_text = banner_bytes.as_deref().map(|b| sanitize_string(&String::from_utf8_lossy(b))); 
 
                     // Lock the results map once for this port's analysis
                     let mut map_guard = results_map_clone.lock().await;
                     if let Some(port_result) = map_guard.get_mut(&port) {
                         // Explicitly type port_result for clarity
                         let result_entry: &mut PortResult = port_result;
-                        result_entry.banner = banner_text.clone(); // Store the banner
+                        result_entry.banner = banner_text.clone(); // Store the sanitized banner text
                         
                         // If banner grabbing was successful, that's a definitive sign that the port is open
                         // Update the port's status to Open if banner was retrieved successfully
-                        if banner_text.is_some() {
+                        if banner_bytes.is_some() {
                             // Update the open status for at least one scan type
                             if !result_entry.tcp_states.is_empty() {
                                 // Update one of the TCP states to Open
                                 if let Some((&first_scan_type, _)) = result_entry.tcp_states.iter().next() {
                                     result_entry.tcp_states.insert(first_scan_type, PortStatus::Open);
+                                    // Update final status as well
+                                    result_entry.final_status = PortStatus::Open;
                                 }
                             }
                         }
@@ -619,6 +632,7 @@ impl QuantumScanner {
                             if let Some(banner_str) = banner_text.as_ref() {
                                 // Use the ServiceFingerprints instance method
                                 if let Some((service, version)) = fingerprint_db_clone.identify_service(port, banner_str) {
+                                    debug!("Fingerprint match for port {}: {} (Version: {:?})", port, service, version);
                                     identified_service = Some(service);
                                     identified_version = version;
                                 }
@@ -626,46 +640,36 @@ impl QuantumScanner {
                         }
 
                         // Priority 3: Use ML identification if enabled and service is unknown/ambiguous
-                        if ml_identification_clone && (identified_service.is_none() || identified_service.as_deref() == Some("unknown")) {
-                            if let Some(ref banner_content) = result_entry.banner {
-                                // Call the correct identification method based on feature flag
-                                #[cfg(feature = "ml")]
-                                if let Some((ml_service, ml_version)) = ml_identifier_clone.as_ref().identify_service(
-                                    banner_content.as_str(),
+                        // Check if ML is enabled AND the identifier instance exists
+                        if ml_identification_clone && ml_identifier_clone.is_some() {
+                            // Check if service is still unknown or poorly identified
+                            if identified_service.is_none() || identified_service.as_deref() == Some("unknown") {
+                                // Get the actual identifier Arc
+                                let identifier = ml_identifier_clone.as_ref().unwrap(); // Safe unwrap due to is_some() check
+                                // Use the raw banner bytes for ML
+                                let banner_data = banner_bytes.as_deref().unwrap_or(&[]); // Use empty slice if no banner
+                                
+                                // Call the identify_service method from the trait
+                                // Provide placeholder values for metadata not directly available here.
+                                // Consider enhancing banner grabbing to return this metadata if needed.
+                                if let Some((ml_service, ml_version)) = identifier.identify_service(
+                                    banner_data, // Pass raw bytes
                                     port,
-                                    0.0,   // Placeholder for response_time_ms
-                                    false, // Placeholder for immediate_close
-                                    true   // Placeholder for server_initiated (assuming banner exists)
+                                    0.0,   // Placeholder for response_time_ms - enhance banner grab if needed
+                                    false, // Placeholder for immediate_close - enhance banner grab if needed
+                                    banner_data.len() > 0 // Placeholder for server_initiated - true if we got data
                                 ) {
                                     debug!("ML identified service for port {}: {} (Version: {:?})", port, ml_service, ml_version);
-                                    identified_service = Some(ml_service); // ml_service is already String
-                                    // Use the version from ML if available, otherwise try banner extraction again
-                                    identified_version = ml_version.or_else(|| {
-                                        identified_service.as_deref().and_then(|service_name| {
-                                            crate::utils::extract_version_from_banner(service_name, banner_content.as_str())
-                                        })
-                                    });
+                                    // Update service/version if ML provided a result (and it wasn't 'unknown')
+                                    identified_service = Some(ml_service); // Overwrite previous result
+                                    identified_version = ml_version; // Overwrite previous version
+                                } else {
+                                    debug!("ML identification did not return a result for port {}", port);
                                 }
-
-                                // Fallback version without ML feature flag
-                                #[cfg(not(feature = "ml"))]
-                                {
-                                    // Create the bytes explicitly to help with type inference
-                                    let content_bytes: &[u8] = banner_content.as_bytes();
-                                    if let Some((ml_service, ml_version)) = ml_identifier_clone.as_ref().identify_service(
-                                        content_bytes,
-                                        port,
-                                        0.0,  // response_time_ms (placeholder)
-                                        false, // immediate_close (placeholder)
-                                        true  // server_initiated (placeholder)
-                                    ) {
-                                        debug!("Minimal service identification for port {}: {} (Version: {:?})", port, ml_service, ml_version);
-                                        identified_service = Some(ml_service); // ml_service is already String
-                                        identified_version = ml_version;
-                                    }
-                                }
+                            } else {
+                                debug!("Skipping ML identification for port {} as service was already identified as '{:?}'", port, identified_service);
                             }
-                        }
+                        } // End ML identification block
 
                         // Priority 4: Analyze HTTP Headers (if banner looks like HTTP)
                         let is_http_like = identified_service.as_deref() == Some("http") || 
@@ -706,7 +710,7 @@ impl QuantumScanner {
                         // --- End Vulnerability Identification ---
 
                         if verbose_clone {
-                            debug!("Analysis complete for port {}: Service={:?}, Version={:?}",
+                            info!("Analysis complete for port {}: Service={:?}, Version={:?}",
                                    port, result_entry.service, result_entry.version);
                         }
                     }

@@ -119,6 +119,106 @@ pub async fn grab_banner(target_ip: IpAddr, port: u16) -> Result<String> {
     }
 }
 
+/// Grab a service banner as raw bytes from the specified IP address and port
+/// 
+/// Similar to grab_banner but returns raw bytes instead of a string.
+/// This is useful for binary protocols where UTF-8 conversion might lose information.
+/// 
+/// # Arguments
+/// * `target_ip` - The IP address to connect to
+/// * `port` - The port to connect to
+/// * `timeout_duration` - The timeout duration for the operation
+/// 
+/// # Returns
+/// * `Result<Vec<u8>>` - The raw banner bytes or an error
+pub async fn grab_banner_raw(target_ip: IpAddr, port: u16, timeout_duration: std::time::Duration) -> Result<Vec<u8>> {
+    let addr = SocketAddr::new(target_ip, port);
+    trace!("Initiating raw banner grab on {}:{}", target_ip, port);
+    
+    // Connect with timeout
+    let conn_result = timeout(
+        timeout_duration,
+        TcpStream::connect(&addr)
+    ).await;
+    
+    match conn_result {
+        Ok(Ok(mut stream)) => {
+            trace!("Connection established to {}:{} for raw banner grab", target_ip, port);
+            
+            // Try different grabbing strategies based on the port
+            let banner = match port {
+                21 | 25 | 110 | 143 => {
+                    // These protocols typically send a banner immediately
+                    // Just read initial data without sending anything
+                    let mut buffer = vec![0; 2048];
+                    
+                    match timeout(timeout_duration, stream.read(&mut buffer)).await {
+                        Ok(Ok(n)) if n > 0 => buffer[0..n].to_vec(),
+                        _ => Vec::new()
+                    }
+                },
+                80 | 443 | 8080 | 8443 => {
+                    // HTTP/HTTPS - send a minimal HTTP request
+                    let request = format!(
+                        "GET / HTTP/1.0\r\n\
+                         Host: {}\r\n\
+                         User-Agent: Mozilla/5.0\r\n\
+                         Connection: close\r\n\r\n",
+                        if target_ip.is_ipv4() { target_ip.to_string() } else { format!("[{}]", target_ip) }
+                    );
+                    
+                    // Send the request with timeout
+                    match timeout(
+                        timeout_duration,
+                        stream.write_all(request.as_bytes())
+                    ).await {
+                        Ok(Ok(_)) => {
+                            // Read the response
+                            let mut buffer = vec![0; 4096];
+                            
+                            match timeout(timeout_duration, stream.read(&mut buffer)).await {
+                                Ok(Ok(n)) if n > 0 => buffer[0..n].to_vec(),
+                                _ => Vec::new()
+                            }
+                        },
+                        _ => Vec::new()
+                    }
+                },
+                22 => {
+                    // SSH - just read the banner, no need to send anything
+                    let mut buffer = vec![0; 256];
+                    
+                    match timeout(timeout_duration, stream.read(&mut buffer)).await {
+                        Ok(Ok(n)) if n > 0 => buffer[0..n].to_vec(),
+                        _ => Vec::new()
+                    }
+                },
+                _ => {
+                    // Generic approach - try passive grabbing 
+                    let mut buffer = vec![0; 1024];
+                    
+                    match timeout(timeout_duration, stream.read(&mut buffer)).await {
+                        Ok(Ok(n)) if n > 0 => buffer[0..n].to_vec(),
+                        _ => Vec::new()
+                    }
+                }
+            };
+            
+            if banner.is_empty() {
+                debug!("No raw banner retrieved from {}:{}", target_ip, port);
+                Ok(Vec::new())
+            } else {
+                trace!("Raw banner retrieved from {}:{} ({} bytes)", target_ip, port, banner.len());
+                Ok(banner)
+            }
+        },
+        _ => {
+            debug!("Failed to connect to {}:{} for raw banner grabbing", target_ip, port);
+            Err(anyhow::anyhow!("Connection failed"))
+        }
+    }
+}
+
 /// Identify service from a banner string
 ///
 /// This function analyzes a service banner to determine the service type.

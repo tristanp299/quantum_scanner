@@ -583,7 +583,7 @@ fn print_detailed_results(results: &ScanResults) -> Result<()> {
             
             // Print banner information
             if let Some(banner) = &result.banner {
-                let mut lines: Vec<&str> = banner.lines().collect();
+                let lines: Vec<&str> = banner.lines().collect();
                 let display_lines = if lines.len() > 5 {
                     // If there are more than 5 lines, show first 3 and last 2
                     let first_lines = &lines[0..3];

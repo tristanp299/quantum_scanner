@@ -37,12 +37,8 @@ use std::fs::File;
 use anyhow::Result;
 use log::{debug, warn};
 use regex;
-
-pub mod ndpi_integration {
-    pub fn detect_protocol(_data: &[u8], _src_port: u16, _dst_port: u16, _is_tcp: bool) -> Option<(String, Option<String>)> {
-        None
-    }
-}
+use rustlearn::prelude::*;
+use rustlearn::array::dense::Array as RustlearnArray;
 
 /// ML-based service identifier implementation
 #[derive(Default)]
@@ -103,23 +99,50 @@ impl MlServiceIdentifier {
         #[cfg(feature = "embedded_model")]
         {
             const MODEL_DATA: &[u8] = include_bytes!("../models/service_model.bin");
-            self.model = Some(deserialize(MODEL_DATA)?);
-            debug!("Loaded ML model from embedded binary");
-            return Ok(());
+            match deserialize(MODEL_DATA) {
+                Ok(model) => {
+                    self.model = Some(model);
+                    debug!("Loaded ML model from embedded binary");
+                    return Ok(());
+                },
+                Err(e) => {
+                    warn!("Could not deserialize embedded ML model: {}", e);
+                    // Continue to try file-based model
+                }
+            }
         }
         
         // If not embedded, try to load from file
         let model_path = PathBuf::from("models/service_model.bin");
         if model_path.exists() {
-            let file = File::open(model_path)?;
-            let mmap = unsafe { Mmap::map(&file)? };
-            self.model = Some(deserialize(&mmap[..])?);
-            debug!("Loaded ML model from file");
-            return Ok(());
+            match File::open(&model_path) {
+                Ok(file) => {
+                    match unsafe { Mmap::map(&file) } {
+                        Ok(mmap) => {
+                            match deserialize(&mmap[..]) {
+                                Ok(model) => {
+                                    self.model = Some(model);
+                                    debug!("Loaded ML model from file");
+                                    return Ok(());
+                                },
+                                Err(e) => {
+                                    warn!("Could not deserialize ML model from file: {}", e);
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Could not memory map ML model file: {}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("Could not open ML model file: {}", e);
+                }
+            }
         }
         
-        warn!("No ML model found, using fallback identification with nDPI");
-        Err(anyhow::anyhow!("ML model not found"))
+        warn!("No ML model found or could not be loaded, using fallback identification methods");
+        Err(anyhow::anyhow!("ML model not found or could not be loaded"))
     }
     
     /// Initialize regex patterns for extracting version information
@@ -306,100 +329,161 @@ impl MlServiceIdentifier {
         // Fallback to generalized version extraction
         crate::utils::extract_version_from_banner(service_name, &text)
     }
-    
-    /// Use nDPI for protocol detection
-    fn use_ndpi_detection(&self, data: &[u8], port: u16) -> Option<(String, Option<String>)> {
-        if data.is_empty() {
-            return None;
-        }
-
-        // Try to detect using nDPI
-        ndpi_integration::detect_protocol(data, 0, port, true)
-    }
 }
 
 // Implement the ServiceIdentification trait for ML-based identification
 impl ServiceIdentification for MlServiceIdentifier {
+    /// Identifies the service running on a port based on banner data and metadata.
+    /// 
+    /// # Identification Strategy
+    /// 1. **ML Prediction:** If the ML model is loaded, extract features and predict the service.
+    /// 2. **Pattern Matching:** If ML fails or is disabled, try matching common banner patterns (e.g., "HTTP/", "SSH-").
+    /// 3. **Port-Based Fallback:** If patterns don't match, guess based on standard port numbers.
+    /// 
+    /// Version extraction is attempted after a service name is determined (by ML or pattern).
     fn identify_service(
         &self,
-        data: &[u8],
-        port: u16,
-        response_time_ms: f32,
-        immediate_close: bool,
-        server_initiated: bool
-    ) -> Option<(String, Option<String>)> {
-        // Try multiple identification methods in order:
+        data: &[u8],        // The banner or initial data received.
+        port: u16,          // The port number.
+        response_time_ms: f32, // How long the service took to respond.
+        immediate_close: bool, // Did the connection close immediately after opening?
+        server_initiated: bool // Did the server send data first? (Less common for TCP)
+    ) -> Option<(String, Option<String>)> { // Returns (ServiceName, Option<VersionString>)
         
-        // 1. First try nDPI detection (most accurate for protocol identification)
-        if let Some(service_info) = self.use_ndpi_detection(data, port) {
-            return Some(service_info);
-        }
-        
-        // 2. Then try ML-based identification if the model is loaded
-        if let Some(_model) = &self.model {
-            // Extract features from the response
-            let _features = self.extract_features(data, port, response_time_ms, 
-                                               immediate_close, server_initiated);
+        // --- Step 1: Attempt ML-Based Identification ---
+        // Only try if we have a model loaded
+        if let Some(model) = &self.model {
+            debug!("ML model is loaded, attempting ML-based identification");
+            // Extract features from the data and metadata.
+            let features_vec = self.extract_features(data, port, response_time_ms, 
+                                                 immediate_close, server_initiated);
             
-            debug!("ML features extracted but prediction skipped due to type incompatibility");
-            
-            // Skip ML prediction for now due to type incompatibility issues
-            // This is a temporary fix to allow compilation
-            
-            // Just use port-based identification as fallback
-            let default_service = match port {
-                22 => Some(("ssh".to_string(), None)),
-                80 | 8080 => Some(("http".to_string(), None)),
-                443 | 8443 => Some(("https".to_string(), None)),
-                21 => Some(("ftp".to_string(), None)),
-                25 | 587 => Some(("smtp".to_string(), None)),
-                _ => None
-            };
-            
-            if default_service.is_some() {
-                return default_service;
+            // Ensure the number of features matches the model's expectation (implicitly 32 here).
+            if features_vec.len() == 32 { // Check expected feature count
+                // Create a new Array with the features
+                let mut features_matrix = RustlearnArray::zeros(1, 32);
+                
+                // Fill the array with our feature values
+                for (i, val) in features_vec.iter().enumerate() {
+                    features_matrix.set(0, i, *val);
+                }
+                
+                // Perform the prediction using the RandomForest model.
+                match model.predict(&features_matrix) { 
+                    Ok(prediction_array) => {
+                        // Check dimensions before accessing the element
+                        if prediction_array.rows() > 0 && prediction_array.cols() > 0 { 
+                            // Directly use the result of get(0, 0) as f32
+                            let predicted_index_val = prediction_array.get(0, 0);
+                            let index = predicted_index_val as usize;
+                            // Map the index to a service label from our predefined list.
+                            if let Some(service_name) = self.service_labels.get(index) {
+                                debug!("ML prediction: Index={}, Service='{}'", index, service_name);
+                                // Avoid returning "unknown" if ML predicts it; let fallbacks provide more context if possible.
+                                if service_name != "unknown" {
+                                    // Attempt to extract version info using regex patterns for the predicted service.
+                                    let version_info = self.extract_version_info(service_name, data);
+                                    // Return the ML-identified service and optional version.
+                                    return Some((service_name.clone(), version_info)); 
+                                } else {
+                                    debug!("ML predicted 'unknown', proceeding to fallbacks for potential refinement.");
+                                }
+                            } else {
+                                warn!("ML predicted index {} which is out of bounds for service_labels ({} labels)", index, self.service_labels.len());
+                            }
+                        } else {
+                             warn!("ML prediction array was empty or had invalid dimensions.");
+                        }
+                    },
+                    Err(e) => {
+                        // Log errors during prediction.
+                        warn!("ML prediction execution failed: {}", e);
+                    }
+                }
+            } else {
+                 warn!("Feature vector size mismatch (expected 32, got {}), skipping ML prediction.", features_vec.len());
             }
+        } else {
+             // Model not loaded - this is logged during initialization.
+             debug!("ML model not loaded, skipping ML prediction and proceeding to fallbacks.");
         }
         
-        // 3. Fall back to pattern-based identification
+        // --- Step 2: Fallback to Pattern-Based Identification ---
+        // Use simple string matching on the banner if ML didn't provide a confident answer or failed.
+        debug!("Attempting fallback pattern-based identification for port {}", port);
         let text_data = String::from_utf8_lossy(data);
         
-        // Try to identify based on common patterns
-        if text_data.starts_with("HTTP/") || text_data.contains("Server:") {
-            // Extract HTTP version info if available
-            let version = if let Some(patterns) = self.version_patterns.get("http") {
-                extract_version_with_patterns(&text_data, patterns)
-            } else {
-                None
-            };
-            return Some(("http".to_string(), version));
+        // Check for common protocol identifiers at the start or within the banner.
+        if text_data.starts_with("HTTP/") || (text_data.contains("Server:") && (port == 80 || port == 443 || port > 1024)) {
+             debug!("Pattern match: Detected HTTP/HTTPS based on banner content.");
+            let service = if port == 443 || text_data.contains("https") { "https" } else { "http" };
+            let version = self.extract_version_info(service, data);
+            return Some((service.to_string(), version));
         } else if text_data.starts_with("SSH-") {
-            // Extract SSH version info if available
-            let version = if let Some(patterns) = self.version_patterns.get("ssh") {
-                extract_version_with_patterns(&text_data, patterns)
-            } else {
-                None
-            };
+             debug!("Pattern match: Detected SSH based on banner content.");
+            let version = self.extract_version_info("ssh", data);
             return Some(("ssh".to_string(), version));
-        } else if text_data.starts_with("220 ") && (text_data.contains("FTP") || text_data.contains("FileZilla")) {
-            // Extract FTP version info if available
-            let version = if let Some(patterns) = self.version_patterns.get("ftp") {
-                extract_version_with_patterns(&text_data, patterns)
-            } else {
-                None
-            };
+        } else if text_data.starts_with("220 ") && (text_data.contains("FTP") || text_data.contains("FileZilla") || text_data.contains("vsftpd") || text_data.contains("ProFTPD")) {
+             debug!("Pattern match: Detected FTP based on banner content.");
+            let version = self.extract_version_info("ftp", data);
             return Some(("ftp".to_string(), version));
+        } else if text_data.starts_with("220 ") && (text_data.contains("SMTP") || text_data.contains("ESMTP") || text_data.contains("Postfix") || text_data.contains("Exim")) {
+             debug!("Pattern match: Detected SMTP based on banner content.");
+            let version = self.extract_version_info("smtp", data);
+            return Some(("smtp".to_string(), version));
+        } else if text_data.contains("RFB ") { // VNC often starts with RFB protocol version
+             debug!("Pattern match: Detected VNC based on banner content (RFB).");
+             let version = self.extract_version_info("vnc", data); // Assuming patterns exist for VNC
+             return Some(("vnc".to_string(), version));
+        } else if data.len() > 5 && data[5..].starts_with(b"MySQL") || text_data.contains("-MariaDB") { // Check binary prefix or MariaDB string
+             debug!("Pattern match: Detected MySQL/MariaDB based on banner content.");
+             let version = self.extract_version_info("mysql", data);
+             return Some(("mysql".to_string(), version));
+        } else if text_data.starts_with("+OK ") && (text_data.contains("POP3") || port == 110) {
+             debug!("Pattern match: Detected POP3 based on banner content.");
+             let version = self.extract_version_info("pop3", data);
+             return Some(("pop3".to_string(), version));
+        } else if text_data.starts_with("* OK ") && (text_data.contains("IMAP") || port == 143) {
+             debug!("Pattern match: Detected IMAP based on banner content.");
+             let version = self.extract_version_info("imap", data);
+             return Some(("imap".to_string(), version));
         }
+
+        // --- Step 3: Fallback to Port-Based Identification ---
+        // If ML and pattern matching fail, make a guess based on the well-known port number.
+        // This is the least reliable method.
+        debug!("Attempting fallback port-based identification for port {}", port);
+        let port_based_service = match port {
+            21 => Some("ftp"),
+            22 => Some("ssh"),
+            23 => Some("telnet"),
+            25 | 587 => Some("smtp"), // Common ports for SMTP
+            53 => Some("dns"),       // Often UDP, but sometimes TCP
+            80 | 8080 | 8000 => Some("http"), // Common HTTP ports
+            110 => Some("pop3"),
+            143 => Some("imap"),
+            443 | 8443 => Some("https"), // Common HTTPS ports
+            445 => Some("smb"),
+            389 | 636 => Some("ldap"), // LDAP / LDAPS
+            3306 => Some("mysql"),
+            3389 => Some("rdp"),
+            5432 => Some("postgresql"),
+            5900 | 5901 => Some("vnc"), // Common VNC ports
+            6379 => Some("redis"),
+            27017 | 27018 => Some("mongodb"), // Common MongoDB ports
+            _ => None, // No common association for this port
+        };
         
-        // 4. Fall back to port-based identification
-        match port {
-            22 => Some(("ssh".to_string(), None)),
-            80 | 8080 => Some(("http".to_string(), None)),
-            443 | 8443 => Some(("https".to_string(), None)),
-            21 => Some(("ftp".to_string(), None)),
-            25 | 587 => Some(("smtp".to_string(), None)),
-            _ => None
+        if let Some(service) = port_based_service {
+            debug!("Fallback identification: Guessed service '{}' based on port {}", service, port);
+            // Don't try version extraction for port-based guesses, as there's no banner evidence.
+            return Some((service.to_string(), None));
         }
+
+        // --- Final Fallback ---
+        // If all methods fail, return None (service unknown).
+        debug!("Service identification failed for port {}", port);
+        None
     }
 }
 

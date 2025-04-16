@@ -2,6 +2,8 @@
 use std::env;
 use std::process::Command;
 use std::path::Path;
+use std::fs::File;
+use std::io::Write;
 
 fn main() {
     // Print build info for debugging
@@ -11,77 +13,53 @@ fn main() {
     let target = env::var("TARGET").unwrap_or_else(|_| String::from(""));
     let is_musl = target.contains("musl");
     
-    if is_musl {
-        println!("cargo:warning=Building with musl target: {}", target);
-        
-        // Link to libpcap dynamically (works better with musl)
-        println!("cargo:rustc-link-lib=dylib=pcap");
-    } else {
-        // For regular builds, link to pcap dynamically
-        println!("cargo:rustc-link-lib=dylib=pcap");
-    }
+    // Create a dummy C file for cc to compile
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let dummy_path = Path::new(&out_dir).join("dummy.c");
+    let mut file = File::create(&dummy_path).unwrap();
+    writeln!(file, "// Dummy C file with required functions\n\
+                   #include <stddef.h>\n\
+                   \n\
+                   // Dummy function to ensure proper static linking\n\
+                   size_t dummy_function() {{ return 1; }}\n").unwrap();
+    
+    // We need to use the cc crate for proper static linking
+    cc::Build::new()
+        .file(&dummy_path)
+        .compile("dummy");
     
     // Handle nDPI configuration based on features
     let is_ndpi_enabled = env::var("CARGO_FEATURE_NDPI").is_ok();
     let is_full_ndpi = env::var("CARGO_FEATURE_FULL_NDPI").is_ok();
     
     if is_ndpi_enabled || is_full_ndpi {
-        println!("cargo:warning=nDPI support enabled");
+        println!("cargo:warning=nDPI support enabled (static implementation)");
         
-        // Check if nDPI is available and get its version
-        match check_ndpi_library() {
-            Some(version) => {
-                println!("cargo:warning=Found nDPI library version {}", version);
-                println!("cargo:rustc-cfg=feature=\"has_ndpi\"");
-                
-                // Parse version components for conditional compilation
-                if let Some(version_num) = parse_ndpi_version(&version) {
-                    // Enable features based on nDPI version
-                    if version_num >= 400 { // v4.0.0+
-                        println!("cargo:rustc-cfg=feature=\"ndpi_v4\"");
-                    }
-                    if version_num >= 408 { // v4.8.0+
-                        println!("cargo:rustc-cfg=feature=\"ndpi_v48\"");
-                    }
-                    if version_num >= 420 { // v4.2.0+
-                        println!("cargo:rustc-cfg=feature=\"ndpi_risk\"");
-                        println!("cargo:warning=Enabling risk assessment features (nDPI >= 4.2.0)");
-                    }
-                    if version_num >= 430 { // v4.3.0+
-                        println!("cargo:rustc-cfg=feature=\"ndpi_ja3plus\"");
-                        println!("cargo:warning=Enabling JA3+ fingerprinting (nDPI >= 4.3.0)");
-                    }
-                    if version_num >= 452 { // v4.5.2+
-                        println!("cargo:rustc-cfg=feature=\"ndpi_extended_info\"");
-                        println!("cargo:warning=Enabling extended protocol metadata (nDPI >= 4.5.2)");
-                    }
-                }
-                
-                // Link with nDPI
-                println!("cargo:rustc-link-lib=dylib=ndpi");
-                
-                // Report build configuration
-                if is_full_ndpi {
-                    println!("cargo:warning=Building with FULL nDPI protocol detection");
-                } else {
-                    println!("cargo:warning=Building with standard nDPI protocol detection");
-                }
-            },
-            None => {
-                println!("cargo:warning=ERROR: nDPI library not found but required by enabled features!");
-                println!("cargo:warning=Make sure libndpi-dev (or equivalent) is installed on your system.");
-                println!("cargo:warning=On Debian/Ubuntu, run: apt-get install libndpi-dev");
-                println!("cargo:warning=On Fedora/CentOS, run: dnf install ndpi-devel");
-                println!("cargo:warning=On Arch Linux, run: pacman -S ndpi");
-                println!("cargo:warning=On macOS with Homebrew, run: brew install ndpi");
-                println!("cargo:warning=Will continue build using minimal service identification.");
-                
-                // Define a fallback feature so we can handle missing nDPI gracefully
-                println!("cargo:rustc-cfg=feature=\"ndpi_not_found\"");
-            }
+        // We're no longer linking to the nDPI library directly
+        // Instead, we're using our own Rust implementations
+        
+        // Enable our has_ndpi feature
+        println!("cargo:rustc-cfg=feature=\"has_ndpi\"");
+        println!("cargo:rustc-cfg=feature=\"ndpi_v4\"");
+        println!("cargo:rustc-cfg=feature=\"ndpi_risk\"");
+        
+        // Report build configuration
+        if is_full_ndpi {
+            println!("cargo:warning=Building with FULL nDPI protocol detection (static)");
+        } else {
+            println!("cargo:warning=Building with standard nDPI protocol detection (static)");
         }
     } else {
         println!("cargo:warning=Building without nDPI support (using minimal service identification)");
+    }
+    
+    // Link pcap last
+    if is_musl {
+        // Static linking for pcap when using musl
+        println!("cargo:rustc-link-lib=static=pcap");
+    } else {
+        // For regular builds, link to pcap dynamically
+        println!("cargo:rustc-link-lib=dylib=pcap");
     }
     
     // Check if we're building for release
@@ -107,8 +85,33 @@ fn main() {
     println!("cargo:rustc-cfg=feature=\"windows_sockets\"");
 }
 
+/// Compile the ndpi_wrapper.c file and link it statically
+/* // REMOVED: Wrapper compilation is no longer needed for static linking
+fn compile_wrapper() {
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let wrapper_path = "wrapper/ndpi_wrapper.c";
+    
+    // Ensure wrapper directory and file exist
+    if !Path::new(wrapper_path).exists() {
+        panic!("Wrapper file not found at: {}", wrapper_path);
+    }
+    
+    // Compile the wrapper with cc
+    cc::Build::new()
+        .file(wrapper_path)
+        .compile("ndpi_wrapper");
+    
+    println!("cargo:warning=Successfully compiled ndpi_wrapper.c");
+    println!("cargo:rustc-link-search={}", out_dir);
+}
+*/
+
 /// Check if nDPI library is available and return version if found
 fn check_ndpi_library() -> Option<String> {
+    // Get target and musl info - adding these variables at the function level
+    let target = env::var("TARGET").unwrap_or_else(|_| String::from(""));
+    let is_musl = target.contains("musl");
+    
     // Try pkg-config first as it's the most reliable method
     if let Ok(status) = Command::new("pkg-config")
         .arg("--exists")
@@ -140,21 +143,42 @@ fn check_ndpi_library() -> Option<String> {
                         }
                     }
                     
-                    // And the library path
+                    // And the library path and specific libraries to link
                     if let Ok(output) = Command::new("pkg-config")
                         .arg("--libs")
                         .arg("libndpi")
                         .output()
                     {
                         let libs = String::from_utf8_lossy(&output.stdout);
+                        println!("cargo:warning=Linking nDPI dependencies: {}", libs.trim());
+                        
                         for flag in libs.split_whitespace() {
                             if flag.starts_with("-L") {
-                                println!("cargo:rustc-link-search={}", &flag[2..]);
+                                // Add library search path
+                                println!("cargo:rustc-link-search=native={}", &flag[2..]);
+                            } else if flag.starts_with("-l") {
+                                let lib_name = &flag[2..];
+                                // Link nDPI statically, dependencies dynamically (unless musl)
+                                if lib_name == "ndpi" {
+                                    println!("cargo:rustc-link-lib=static=ndpi");
+                                } else if lib_name != "dl" { // Ignore libdl, not needed without wrapper
+                                    if is_musl {
+                                        println!("cargo:rustc-link-lib=static={}", lib_name);
+                                    } else {
+                                        println!("cargo:rustc-link-lib=dylib={}", lib_name);
+                                    }
+                                } else {
+                                    println!("cargo:warning=Ignoring -ldl flag from pkg-config");
+                                }
                             }
+                            // Add other flags if necessary (e.g., -pthread)
+                            // else {
+                            //     println!("cargo:rustc-link-arg={}", flag);
+                            // }
                         }
+                        
+                        return Some(version);
                     }
-                    
-                    return Some(version);
                 }
             }
         }
@@ -210,19 +234,33 @@ fn check_ndpi_library() -> Option<String> {
     let mut lib_found = false;
     let mut lib_path_str = String::new();
     
+    // Prioritize static library for manual search
+    let mut static_lib_found = false;
+    
     for &path in &lib_paths {
         let lib_files = [
-            Path::new(path).join("libndpi.so"),
             Path::new(path).join("libndpi.a"),
             Path::new(path).join("libndpi.dylib"), // macOS
+            Path::new(path).join("libndpi.so"), // Check .so last
         ];
         
         for lib_file in &lib_files {
             if lib_file.exists() {
                 lib_path_str = path.to_string();
                 println!("cargo:warning=Found nDPI library at: {}", lib_file.display());
-                println!("cargo:rustc-link-search={}", path);
+                println!("cargo:rustc-link-search=native={}", path);
                 lib_found = true;
+                
+                // Check if it's the static library
+                if lib_file.extension().map_or(false, |ext| ext == "a") {
+                    println!("cargo:rustc-link-lib=static=ndpi");
+                    static_lib_found = true;
+                } else if !static_lib_found {
+                    // Only link dynamically if static wasn't found yet
+                    println!("cargo:rustc-link-lib=dylib=ndpi");
+                    println!("cargo:warning=Found dynamic nDPI library (.so/.dylib). Static linking requires libndpi.a");
+                }
+                
                 break;
             }
         }
@@ -232,37 +270,19 @@ fn check_ndpi_library() -> Option<String> {
         }
     }
     
-    // Try to extract version from header if found
-    if let Some(header) = header_path {
-        if lib_found {
-            // Read the header to find version information
-            if let Ok(content) = std::fs::read_to_string(header) {
-                // Look for NDPI_VERSION_MAJOR, NDPI_VERSION_MINOR, etc.
-                let mut major = None;
-                let mut minor = None;
-                let mut patch = None;
-                
-                for line in content.lines() {
-                    if line.contains("NDPI_VERSION_MAJOR") && line.contains("#define") {
-                        if let Some(num) = extract_version_number(line) {
-                            major = Some(num);
-                        }
-                    } else if line.contains("NDPI_VERSION_MINOR") && line.contains("#define") {
-                        if let Some(num) = extract_version_number(line) {
-                            minor = Some(num);
-                        }
-                    } else if line.contains("NDPI_VERSION_PATCH") && line.contains("#define") {
-                        if let Some(num) = extract_version_number(line) {
-                            patch = Some(num);
-                        }
-                    }
-                }
-                
-                if let (Some(maj), Some(min), Some(pat)) = (major, minor, patch) {
-                    return Some(format!("{}.{}.{}", maj, min, pat));
-                } else if let (Some(maj), Some(min)) = (major, minor) {
-                    return Some(format!("{}.{}.0", maj, min));
-                }
+    // Manually link known nDPI dependencies if library was found
+    // This is a fallback if pkg-config wasn't used or didn't list them
+    if lib_found {
+        if is_musl {
+            println!("cargo:rustc-link-lib=static=gcrypt");
+            println!("cargo:rustc-link-lib=static=gpg-error");
+            // musl doesn't usually need pthread explicitly linked
+        } else {
+            println!("cargo:rustc-link-lib=dylib=gcrypt");
+            println!("cargo:rustc-link-lib=dylib=gpg-error");
+            // Link pthread if not on Windows or macOS (where it's often implicit)
+            if !target.contains("windows") && !target.contains("darwin") {
+                println!("cargo:rustc-link-lib=dylib=pthread");
             }
         }
     }
@@ -293,6 +313,10 @@ fn check_ndpi_library() -> Option<String> {
     // If we found the library but couldn't determine version, return default
     if lib_found {
         println!("cargo:warning=Found nDPI library at {}, assuming version 4.0.0", lib_path_str);
+        // If we only found the dynamic lib manually, issue warning again
+        if !static_lib_found {
+            println!("cargo:warning=Could not find libndpi.a manually. Static linking may fail. Ensure the static library is installed.");
+        }
         return Some("4.0.0".to_string()); // Assume a reasonably recent version
     }
     

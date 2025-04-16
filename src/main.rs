@@ -18,6 +18,8 @@ mod banner;
 mod http_analyzer;
 mod ml_service_ident;
 mod models;
+mod ndpi_integration;
+mod ndpi_sys;
 mod output;
 mod scanner;
 mod service_fingerprints;
@@ -1246,8 +1248,8 @@ async fn main() -> Result<(), anyhow::Error> {
         args.frag_first_min_size,
         args.frag_two_frags,
         &args.log_file,
-        true, // ml_identification - TODO: Make this configurable?
         service_scan_mode, // Pass the determined service scan mode
+        true, // Enable ML identification by default
     ).await?;
 
     // Set enhanced evasion options if enabled

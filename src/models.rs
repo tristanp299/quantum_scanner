@@ -327,8 +327,8 @@ pub struct PortResult {
     /// Protocol guess from nDPI analysis.
     pub ndpi_protocol: Option<String>,
 
-    /// Confidence level of the nDPI protocol guess.
-    pub ndpi_confidence: Option<String>,
+    /// Confidence level of the nDPI protocol guess (0.0 - 1.0).
+    pub ndpi_confidence: Option<f32>,
 }
 
 impl Default for PortResult {
