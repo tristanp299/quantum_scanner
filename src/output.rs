@@ -168,11 +168,7 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
             
             // nDPI protocol detection if available
             if let Some(protocol) = &port_result.ndpi_protocol {
-                output.push_str(&format!("Protocol (nDPI): {}", protocol));
-                if let Some(confidence) = &port_result.ndpi_confidence {
-                    output.push_str(&format!(" (Confidence: {})", confidence));
-                }
-                output.push_str("\n");
+                output.push_str(&format!("Protocol (nDPI): {:?}\n", protocol));
             }
             
             // States by scan type
@@ -231,8 +227,10 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
             // Enhanced service details
             if let Some(details) = &port_result.service_details {
                 output.push_str("Service Details:\n");
-                for (key, value) in details {
-                    output.push_str(&format!("  - {}: {}\n", key, value));
+                if let Some(map) = details.as_object() {
+                    for (key, value) in map {
+                        output.push_str(&format!("  - {}: {}\n", key, value));
+                    }
                 }
             }
             
@@ -344,7 +342,7 @@ fn format_port_text(file: &mut File, port: u16, result: &PortResult) -> Result<(
         writeln!(file, "\nStatus Reason: {}", reason)?;
     }
     
-    // Firewall filtering
+    // Filtering if available
     if let Some(filtering) = &result.filtering {
         writeln!(file, "Filtering: {}", filtering)?;
     }
@@ -695,7 +693,7 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
         
         // nDPI protocol detection if available
         if let Some(protocol) = &port_result.ndpi_protocol {
-            println!("Protocol (nDPI): {}", protocol);
+            println!("Protocol (nDPI): {:?}", protocol);
             if let Some(confidence) = &port_result.ndpi_confidence {
                 println!("Confidence: {}", confidence);
             }

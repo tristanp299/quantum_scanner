@@ -1,341 +1,176 @@
-//! FFI bindings for nDPI library
-//! 
-//! This module provides low-level bindings to the nDPI C library functions.
-//! Configured to support all available nDPI protocols and features for
-//! comprehensive service identification.
-//!
-//! NOTE: This implementation includes stub functions for static compilation
+//! Low-level FFI bindings and related functions for interacting with the nDPI library.
+//! This module aims to provide a safe abstraction over the raw C API where possible,
+//! but primarily re-exports necessary types and functions from the generated `ndpi_bindings.rs`.
 
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
+// Re-export key types and functions from the raw bindings for easier use.
+// Use `pub use` to make them accessible from other modules using `crate::ndpi_sys::`. 
+pub use crate::ndpi_bindings::{ // Using pub use to re-export
+    // Core Structures
+    ndpi_detection_module_struct,
+    ndpi_flow_struct,
+    // ndpi_protocol_struct, // Likely exists but caused issues, use ndpi_protocol_id_t based on suggestion
+    ndpi_protocol_id_t, // Protocol ID type (Used suggestion)
+    ndpi_protocol,
+    ndpi_risk_enum, // Risk enum type
+    // ndpi_proto_defaults_t, // Unused
+    // ndpi_protocol_category_t, // Unused warning
+    // ndpi_risk, // Unused warning
 
-use std::os::raw::{c_char, c_int, c_void};
-use log::debug;
+    // Initialization & Configuration Functions
+    ndpi_init_detection_module,
+    ndpi_exit_detection_module,
+    // ndpi_set_detection_preferences, // Unused
+    // ndpi_load_protocols, // Removed, likely ndpi_load_protocols_file or not needed
+    // ndpi_set_proto_defaults, // Unused
+    // ndpi_free_protocols, // Removed, likely handled by exit module
+    // ndpi_protocol_breed_t, // Removed unused
+    // ndpi_detection_preference_NDPI_DETECTION_PREF_DEFAULT, // Unresolved - Name likely different in bindings
 
-// Basic type definitions for nDPI FFI
-pub type ndpi_protocol_category_t = u32;
-pub type ndpi_protocol_id_t = u16;
-pub type ndpi_risk_enum = u64;
+    // Processing Function
+    ndpi_detection_process_packet,
 
-// nDPI detection module and flow structs
-pub enum ndpi_detection_module_struct {}
+    // Information Retrieval Functions
+    // ndpi_get_proto_name, // Unused
+    // ndpi_get_num_supported_protocols, // Unused warning
+    // ndpi_get_category_name, // Use suggested ndpi_get_category_id?
+    // ndpi_get_category_id, // Unused
+    ndpi_revision, // Used
+    // ndpi_is_protocol_detected, // Unused
+    // ndpi_get_api_version, // Unused
 
-#[repr(C)]
-pub struct ndpi_flow_struct {
-    // We only need a few fields here, others are opaque to us
-    pub detected_protocol_stack: [u16; 2],
-    pub risk: ndpi_risk_enum,
-    pub host_server_name: [c_char; 256], // Buffer for hostname
-    // Rest of fields omitted - we access via explicit functions
-}
+    // Risk Handling
+    ndpi_risk2str, // Used
+    // ndpi_risk2int, // Unresolved, suggested ndpi_risk2str which is likely incorrect for score
+    // Keep removed, call site in ndpi_integration needs direct binding call if function exists
+    // Consider ndpi_risk_get_score if ndpi_risk2int remains problematic
 
-// Packet structure used by nDPI for analysis
-#[repr(C)]
-pub struct ndpi_packet_struct {
-    pub iph: *const c_void,           // IPv4 header
-    pub iphv6: *const c_void,         // IPv6 header
-    pub tcp: *const c_void,           // TCP header
-    pub udp: *const c_void,           // UDP header
-    pub payload: *const u8,           // Packet payload
-    pub payload_packet_len: u16,      // Payload length
-    pub l4_packet_len: u16,           // Layer 4 packet length
-    pub l3_packet_len: u16,           // Layer 3 packet length
-    pub l4_protocol: u8,              // Layer 4 protocol (TCP=6, UDP=17)
-    pub packet_direction: u8,         // Packet direction (0=outgoing, 1=incoming)
-    pub packet_lines_parsed_complete: u8, // Whether packet lines were completely parsed
-    pub packet_lines_parsed: u16,     // Number of packet lines parsed
-    pub empty_line_position: u16,     // Position of empty line
-    pub host_line_len: u16,           // Host line length
-    pub http_url_name_len: u16,       // HTTP URL name length
-    pub content_line_len: u16,        // Content line length
-    pub content_len: c_int,           // Content length
-    pub current_line_len: u16,        // Current line length
-    pub current_line_ptr: *const c_char, // Current line pointer
-    pub host_line_ptr: *const c_char, // Host line pointer
-    pub referer_line_ptr: *const c_char, // Referer line pointer
-    pub content_line_ptr: *const c_char, // Content line pointer
-    pub accept_line_ptr: *const c_char, // Accept line pointer
-    pub authorization_line_ptr: *const c_char, // Authorization line pointer
-    pub user_agent_line_ptr: *const c_char, // User agent line pointer
-    pub http_url_name_ptr: *const c_char, // HTTP URL name pointer
-    pub http_method_ptr: *const c_char, // HTTP method pointer
-    pub http_version_ptr: *const c_char, // HTTP version pointer
-    pub server_line_ptr: *const c_char, // Server line pointer
-    pub http_origin_ptr: *const c_char, // HTTP origin pointer
-    pub boundary_ptr: *const c_char,  // Boundary pointer
-    pub content_type_ptr: *const c_char, // Content type pointer
-    pub content_encoding_ptr: *const c_char, // Content encoding pointer
-    pub cookie_ptr: *const c_char,    // Cookie pointer
-    pub content_type_line_len: u16,   // Content type line length
-    pub media_type_ptr: *const c_char, // Media type pointer
-    pub packet_time_ms: u32,          // Packet timestamp in ms
-    pub current_time_ms: u32,         // Current time in ms
-}
+    // Constants & Enums (Examples)
+    // ndpi_protocol_category_NDPI_PROTOCOL_CATEGORY_SECURITY, // Use suggested ..._MEDIA?
+    // ndpi_protocol_category_t_NDPI_PROTOCOL_CATEGORY_MEDIA, // Use suggested name
+    // ndpi_protocol_category_t_NDPI_PROTOCOL_CATEGORY_UNSPECIFIED, // Removed unused
+    // ndpi_protocol_category_NDPI_PROTOCOL_CATEGORY_NUM, // Use suggested ..._VPN?
+    // ndpi_protocol_category_t_NDPI_PROTOCOL_CATEGORY_VPN, // Use suggested name pattern
+    // ndpi_protocol_breed_NDPI_PROTOCOL_FUN, // Unresolved
+    // ndpi_protocol_breed_t_NDPI_PROTOCOL_FUN, // Use suggested name
+    // ndpi_prefs_t, // Use suggested ndpi_prefix_t?
+    // ndpi_prefix_t, // Unused
+    // ndpi_init_prefs, // Unused warning
+    ndpi_protocol_id_t_NDPI_PROTOCOL_UNKNOWN, // Used
+    ndpi_risk_enum_NDPI_NO_RISK, // Used
+    // Unused constants
+    // ndpi_protocol_category_t_NDPI_PROTOCOL_CATEGORY_MEDIA,
+    // ndpi_protocol_category_t_NDPI_PROTOCOL_CATEGORY_VPN,
+    // ndpi_protocol_breed_t_NDPI_PROTOCOL_FUN,
+};
 
-impl Default for ndpi_packet_struct {
-    fn default() -> Self {
-        unsafe { std::mem::zeroed() }
-    }
-}
+// Re-export necessary libc types
+// pub use libc::{
+//     c_char,
+//     c_int,
+//     c_uint,
+//     c_uchar,
+//     c_void,
+//     // time_t, // Not directly used
+//     // timeval, // Not directly used
+//     calloc, // Used for manual allocation
+//     free, // Used implicitly via ndpi_flow_free etc.
+// };
 
-// nDPI preference values
-#[repr(C)]
-pub enum ndpi_detection_preference_values {
-    ndpi_no_prefs = 0,
-    ndpi_dont_load_tor_entries,
-    ndpi_dont_init_libgcrypt,
-    ndpi_enable_ja3_plus,
-    ndpi_deep_protocol_inspection,
-}
+// Helper function to potentially get nDPI version string (may require linking correctly)
+// This requires the nDPI library to be linked, and the function `ndpi_revision` to exist.
+// use std::ffi::{CStr, CString};
+// use std::os::raw::c_char; // Removed unused import
 
-// Known protocol identifiers
-pub const NDPI_PROTOCOL_UNKNOWN: u16 = 0;
-pub const NDPI_PROTOCOL_FTP: u16 = 1;
-pub const NDPI_PROTOCOL_MAIL_POP: u16 = 2;
-pub const NDPI_PROTOCOL_MAIL_SMTP: u16 = 3;
-pub const NDPI_PROTOCOL_MAIL_IMAP: u16 = 4;
-pub const NDPI_PROTOCOL_DNS: u16 = 5;
-pub const NDPI_PROTOCOL_HTTP: u16 = 7;
-pub const NDPI_PROTOCOL_SSL: u16 = 91;
-pub const NDPI_PROTOCOL_SSH: u16 = 92;
-pub const NDPI_PROTOCOL_TELNET: u16 = 93;
-pub const NDPI_PROTOCOL_TLS: u16 = 91; // Same as SSL in nDPI
-
-// STATIC IMPLEMENTATION: Rust implementations of all nDPI functions for static build
-// These are stubs that allow compilation without the actual nDPI library
-
-// Initialization and cleanup
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_init_detection_module(
-    _detection_ticks: u32
-) -> *mut ndpi_detection_module_struct {
-    // Simply allocate a dummy structure
-    libc::calloc(1, 1024) as *mut ndpi_detection_module_struct
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_exit_detection_module(
-    ndpi_struct: *mut ndpi_detection_module_struct
-) {
-    if !ndpi_struct.is_null() {
-        libc::free(ndpi_struct as *mut c_void);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_set_protocol_detection_bitmask2(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    _detection_bitmask: *const c_void
-) {
-    // No-op implementation
-}
-
-// Protocol detection functions
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_detection_process_packet(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    flow: *mut ndpi_flow_struct,
-    packet: *mut ndpi_packet_struct,
-    _time_ms: u32,
-    _src_id: *mut u32,
-    _dst_id: *mut u32
-) -> u32 {
-    // Basic implementation that checks packet type and sets a protocol
-    if !flow.is_null() && !packet.is_null() {
-        let packet_ref = &*packet;
-        let flow_ref = &mut *flow;
-        
-        // Simple protocol detection based on port numbers
-        // In a real implementation, this would be much more sophisticated
-        match packet_ref.l4_protocol {
-            6 => { // TCP
-                flow_ref.detected_protocol_stack[0] = NDPI_PROTOCOL_HTTP; // Assume HTTP for TCP
-            },
-            17 => { // UDP
-                flow_ref.detected_protocol_stack[0] = NDPI_PROTOCOL_DNS; // Assume DNS for UDP
-            },
-            _ => {
-                flow_ref.detected_protocol_stack[0] = NDPI_PROTOCOL_UNKNOWN;
-            }
-        }
-        
-        flow_ref.detected_protocol_stack[0] as u32
-    } else {
-        NDPI_PROTOCOL_UNKNOWN as u32
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_detection_giveup(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    flow: *mut ndpi_flow_struct,
-    _enable_guess: c_int,
-    _src_id: *mut u32,
-    _dst_id: *mut u32
-) -> u32 {
-    if !flow.is_null() {
-        let flow_ref = &*flow;
-        flow_ref.detected_protocol_stack[0] as u32
-    } else {
-        NDPI_PROTOCOL_UNKNOWN as u32
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_get_proto_name(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    proto: c_int
-) -> *const c_char {
-    // Return static strings for known protocols
-    match proto as u16 {
-        NDPI_PROTOCOL_UNKNOWN => b"Unknown\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_FTP => b"FTP\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_MAIL_POP => b"POP3\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_MAIL_SMTP => b"SMTP\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_MAIL_IMAP => b"IMAP\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_DNS => b"DNS\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_HTTP => b"HTTP\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_SSL => b"SSL\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_SSH => b"SSH\0".as_ptr() as *const c_char,
-        NDPI_PROTOCOL_TELNET => b"Telnet\0".as_ptr() as *const c_char,
-        _ => b"Unclassified\0".as_ptr() as *const c_char,
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_get_num_supported_protocols(
-    _ndpi_struct: *mut ndpi_detection_module_struct
-) -> c_int {
-    // Return a reasonable number of supported protocols
-    100
-}
-
-// Protocol category functions
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_get_proto_category(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    _proto: u32
-) -> ndpi_protocol_category_t {
-    // Return a generic category
-    0
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_category_get_name(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    _category: ndpi_protocol_category_t
-) -> *const c_char {
-    // Return a generic category name
-    b"Network\0".as_ptr() as *const c_char
-}
-
-// Protocol properties functions
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_is_encrypted_proto(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    proto: u32
-) -> c_int {
-    // Basic check for encrypted protocols
-    match proto as u16 {
-        NDPI_PROTOCOL_SSL | NDPI_PROTOCOL_SSH => 1,
-        _ => 0,
-    }
-}
-
-// Protocol configuration functions
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_set_all_protocols(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    _status: c_int
-) {
-    // No-op implementation
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_set_detection_preferences(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    _preferences: c_int
-) {
-    // No-op implementation
-}
-
-// Flow handling functions
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_free_flow(flow: *mut ndpi_flow_struct) {
-    // IMPORTANT: This should only be used for flow pointers that were dynamically
-    // allocated and not already freed. In our implementation, we use stack-allocated
-    // flow structs in most places, and those should not be passed to this function.
-    // 
-    // Only free if the pointer is not null and we're certain it needs freeing
-    // This function is now a no-op for safety, as our Drop implementation already
-    // manages memory properly
-    
-    // Check if someone passed a pointer that might need freeing in future implementations
-    if !flow.is_null() {
-        debug!("ndpi_free_flow called - note that our implementation manages flow memory internally");
-        // DO NOT free here - our architecture handles memory differently
-        // libc::free(flow as *mut c_void);
-    }
-}
-
-// Version information
-#[no_mangle]
-pub unsafe extern "C" fn ndpi_revision() -> *const c_char {
-    // Return a static version string
-    b"4.2.0-static\0".as_ptr() as *const c_char
-}
-
-// Original wrapped functions
-
-#[no_mangle]
-pub unsafe extern "C" fn wrapped_ndpi_flow_struct_size() -> usize {
-    // Return a reasonable size for the flow struct
-    1024
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn wrapped_ndpi_get_app_protocol(
-    _ndpi_struct: *mut ndpi_detection_module_struct,
-    flow: *mut ndpi_flow_struct
-) -> u32 {
-    if !flow.is_null() {
-        let flow_ref = &*flow;
-        flow_ref.detected_protocol_stack[0] as u32
-    } else {
-        NDPI_PROTOCOL_UNKNOWN as u32
-    }
-}
-
-// Wrapper for creating a new ndpi_flow_struct (since it's an opaque type)
-impl ndpi_flow_struct {
-    pub fn new() -> Self {
-        unsafe {
-            // Call the wrapper function to get the size
-            let flow_size = wrapped_ndpi_flow_struct_size(); 
-            let flow_ptr = libc::calloc(1, flow_size) as *mut ndpi_flow_struct;
-            
-            if flow_ptr.is_null() {
-                panic!("Failed to allocate memory for ndpi_flow_struct");
-            }
-            
-            // Initialize with default values
-            let mut flow = std::ptr::read(flow_ptr);
-            flow.detected_protocol_stack = [0, 0];
-            flow.risk = 0;
-            
-            // IMPORTANT: We must free flow_ptr as we created a copy, not a reference
-            libc::free(flow_ptr as *mut c_void);
-            
-            flow
+/*
+// Example function to get the nDPI version string.
+// Safety: Assumes `ndpi_revision` is correctly linked and returns a valid C string pointer.
+pub fn get_ndpi_version_string() -> String {
+    unsafe {
+        let version_ptr = ndpi_revision(); // Call the FFI function
+        if version_ptr.is_null() {
+            "<nDPI version unknown: null pointer returned>".to_string()
+        } else {
+            // Convert the C string pointer to a Rust String, handling potential errors.
+            CStr::from_ptr(version_ptr)
+                .to_str()
+                .unwrap_or("<nDPI version unknown: invalid UTF-8>")
+                .to_string()
         }
     }
 }
 
-// Ensure we clean up the flow struct when it's dropped
-impl Drop for ndpi_flow_struct {
-    fn drop(&mut self) {
-        // Do nothing here - we already freed the pointer in new()
-        // The struct is stack-allocated since we used std::ptr::read
-        // The original memory was freed immediately after creating our copy
+// Helper to convert C string pointer to Option<String>
+// Safety: Caller must ensure ptr is valid or null.
+// #[inline]
+pub unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        None
+    } else {
+        match CStr::from_ptr(ptr).to_str() {
+            Ok(s) => Some(s.to_owned()),
+            Err(e) => {
+                // Log the error if possible, return None or a placeholder
+                // eprintln!("Failed to convert C string from nDPI: {}", e);
+                None
+            }
+        }
     }
-} 
+}
+
+// Helper to convert Rust numeric types to u16 for nDPI calls
+// TODO: Add proper error handling for potential overflow.
+// #[inline]
+pub fn as_u16<T: TryInto<u16>>(val: T) -> u16 {
+    val.try_into().unwrap_or_else(|_| {
+        // eprintln!("Warning: Value conversion to u16 failed, defaulting to 0");
+        0 // Default or panic, depending on context
+    })
+}
+*/
+
+// FFI safe function wrappers or helpers (optional)
+use std::ffi::CStr;
+// Removed duplicate c_char import: use std::os::raw::c_char;
+
+// Removed unused imports:
+// pub use bindings::ndpi_packet_struct;
+// pub use bindings::ndpi_detection_preference;
+// pub use bindings::ndpi_detection_giveup;
+
+// Helper function to get version string (example)
+// Removed broken helper function get_ndpi_version_string due to E0599/E0308
+
+// Helper function to get revision string (example)
+pub fn get_ndpi_revision_string() -> String {
+    unsafe {
+        let rev_ptr = ndpi_revision();
+        if rev_ptr.is_null() {
+            "N/A".to_string()
+        } else {
+            CStr::from_ptr(rev_ptr).to_string_lossy().into_owned()
+        }
+    }
+}
+
+// Example of constants if they are not directly exposed by bindgen allowlist_var
+// pub const NDPI_PREFS_DEFAULT: ndpi_prefs_t = 0;
+
+// Helper for allocating/freeing flow structs (avoids direct libc calls in engine)
+// Ensure these match the actual nDPI API for flow management if available.
+// Sometimes nDPI provides its own allocators/deallocators.
+
+// Placeholder function: Check if ndpi_malloc exists in your bindings
+pub fn ndpi_flow_malloc() -> *mut ndpi_flow_struct {
+    // If nDPI provides ndpi_malloc, use it. Otherwise, fallback to libc.
+    // unsafe { sys::ndpi_malloc(std::mem::size_of::<ndpi_flow_struct>()) as *mut ndpi_flow_struct }
+    unsafe { libc::malloc(std::mem::size_of::<ndpi_flow_struct>()) as *mut ndpi_flow_struct }
+}
+
+// Placeholder function: Check if ndpi_free exists in your bindings
+pub fn ndpi_flow_free(flow: *mut ndpi_flow_struct) {
+    // If nDPI provides ndpi_free, use it.
+    // unsafe { sys::ndpi_free(flow as *mut libc::c_void) }
+    unsafe { libc::free(flow as *mut libc::c_void) }
+}
+
+// Add other necessary re-exports or helper functions here.

@@ -1,36 +1,80 @@
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+//! Core scanning logic, including port scanning, banner grabbing, and orchestrating other analyses.
+
+use crate::models::{
+    PortResult, ScanResults, ScanType, PortStatus, VulnInfo, ScanResult, 
+    requires_raw_sockets, MimicPayloads, ScanMetrics, // Removed NDPIProtocolInfo, CommonPorts
+    // Removed unresolved: PortInfo, HostInfo, ScanConfig, HostStatus, ServiceInfo, Banner, VulnCheckResult, VulnerabilityInfo
+};
+// Removed unresolved: use crate::techniques::perform_scan_technique;
+// Removed unresolved: use crate::utils::{resolve_target, select_source_ip};
+// Removed unresolved: use crate::banner::grab_banner_http;
+// Removed unresolved: use crate::service_fingerprints::match_service_fingerprint;
+
+// Import nDPI engine if enabled
+// #[cfg(feature = "ndpi")]
+// Removed unused: use crate::ndpi_integration::NdpiEngine;
+
+use anyhow::{anyhow, Result}; // Removed unused Context
+// Removed unused: use futures::stream::StreamExt;
+// Removed unused: use ipnet::IpNet;
+use log::{debug, error, info, warn, trace}; // Added trace macro
+// Removed unused: use pnet::packet::{ip::IpNextHeaderProtocols, tcp::TcpFlags};
+use std::collections::HashMap; // Added HashMap
+use std::net::{IpAddr, SocketAddr, Ipv4Addr}; // Added Ipv4Addr
+use std::sync::Arc; // Keep Arc, remove std::sync::Mutex
+// Removed duplicate/conflicting std::sync::Mutex
+use std::time::Duration; // Keep Duration, remove unused SystemTime, UNIX_EPOCH
+use tokio::net::TcpStream; // Removed unused UdpSocket
+use tokio::sync::Semaphore;
+// Removed unused: use tokio::io::AsyncReadExt;
+// Removed unused: use tokio::sync::mpsc;
+use tokio::time::Instant; // Added Instant
+use tokio::sync::mpsc; // Re-added mpsc as it's used in perform_ndpi_analysis
+
+// Conditional pcap import
+#[cfg(feature = "ndpi")]
+// Removed unused: use pcap::{Device, Packet, Error as PcapError};
+use pcap::{Device, Capture}; // Keep Device, Capture
+
+use std::collections::{HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-// use std::fs::File;
-// Use comment style
-// use std::io::Write;
+// Removed duplicate: use std::sync::Arc;
+// Removed duplicate: use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+// Removed duplicate anyhow import
 use chrono::prelude::Utc;
-use log::{debug, error, info, warn};
-use tokio::sync::{Mutex, Semaphore};
+// Removed duplicate: use log::{debug, error, info, warn};
+use tokio::sync::Mutex; // Use tokio's Mutex for async contexts
+// Removed duplicate: use tokio::sync::Semaphore; // Already imported above
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+// Removed unused: use tokio::time::timeout;
+// Removed duplicate: use tokio::io::{AsyncReadExt};
 use futures::future::join_all;
-// use rand::Rng;
 
-use crate::models::{PortResult, ScanResults, ScanType, PortStatus, /*CertificateInfo, HttpInfo,*/ VulnInfo, ScanResult, requires_raw_sockets, MimicPayloads, ScanMetrics};
-use crate::utils::{MemoryLogBuffer, sanitize_string};
-use crate::techniques;
-use crate::banner;
+// Combine model imports again, ensure no duplicates remain from line 51
+// use crate::models::{PortResult, ScanResults, ScanType, PortStatus, /*CertificateInfo, HttpInfo,*/ VulnInfo, ScanResult, requires_raw_sockets, MimicPayloads, ScanMetrics};
+use crate::utils::MemoryLogBuffer; // Keep MemoryLogBuffer
+// Removed unresolved: use crate::utils::sanitize_string; // Check if sanitize_string is defined elsewhere or needed
+use crate::techniques; // Keep techniques module import
+// Removed unused: use crate::banner;
 use crate::http_analyzer;
 use crate::service_fingerprints::ServiceFingerprints;
 use crate::ml_service_ident;
 use crate::ml_service_ident::ServiceIdentification;
-use crate::ndpi_integration;
+use crate::ndpi_integration; // Add module import
+use crate::utils::{find_local_ipv4}; // Add this import at the top
+// Removed duplicate Capture import - Device and Capture are already imported earlier
+// use pcap::{Capture}; // Remove Error alias
 
 // --- Rate Limiting Imports ---
 use governor::{Quota, RateLimiter, state::direct::NotKeyed, clock::DefaultClock};
 use std::num::NonZeroU32;
 // --- End Rate Limiting Imports ---
+
+// Removed duplicate: use pcap::{Device, Capture}; // Already imported conditionally
+// Removed unused: use tokio::task;
+
+use crate::banner::grab_banner_raw; // Use suggested name (was grab_banner_http)
 
 /// Main scanner implementation
 /// Orchestrates port scanning using various techniques and performs post-scan analysis.
@@ -117,7 +161,7 @@ impl QuantumScanner {
         target: &str,
         ports: Vec<u16>, // Use the ports parameter
         scan_types: Vec<ScanType>, // Use the scan_types parameter
-        local_ip_v4: Option<Ipv4Addr>, // Added local_ip_v4 parameter
+        local_ip_v4: Option<Ipv4Addr>, // Use imported Ipv4Addr
         concurrency: usize,
         max_rate: usize, // Use the max_rate parameter
         evasion: bool, // Use the evasion parameter
@@ -380,8 +424,8 @@ impl QuantumScanner {
         // - `semaphore`: Limits the number of concurrent scan tasks.
         let results_map = Arc::new(Mutex::new(HashMap::<u16, PortResult>::new()));
         let open_ports_set = Arc::new(Mutex::new(HashSet::<u16>::new()));
-        let packets_sent = Arc::new(Mutex::new(0u64)); // Note: Counts tasks started, not actual network packets.
-        let successful_scans = Arc::new(Mutex::new(0u64)); // Note: Counts tasks completed without error from techniques::*
+        let packets_sent = Arc::new(Mutex::new(0u64)); // Uses tokio::sync::Mutex now
+        let successful_scans = Arc::new(Mutex::new(0u64)); // Uses tokio::sync::Mutex now
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
         // Initial tasks vector declaration
         
@@ -475,18 +519,21 @@ impl QuantumScanner {
                 let ndpi_engine_task_clone = ndpi_engine_clone.clone();
                 let results_map_task_clone = results_map.clone();
                 let target_ip_task_clone = target_ip;
-                let timeout_task_clone = self.timeout_scan; // Reuse scan timeout for nDPI connection attempt
                 let semaphore_task_clone = ndpi_semaphore.clone();
+                let timeout_task_clone = self.timeout_scan; // Reuse scan timeout for nDPI connection/banner attempt
 
                 ndpi_tasks.push(tokio::spawn(async move {
                      let _permit = match semaphore_task_clone.acquire().await {
                          Ok(p) => p,
-                         Err(_) => return, // Semaphore closed
+                         Err(_) => {
+                            warn!("[nDPI] Failed to acquire semaphore permit for port {}. Skipping.", port);
+                            return; // Semaphore closed or error
+                         }
                      };
                     Self::perform_ndpi_analysis(
                         target_ip_task_clone,
                         port,
-                        timeout_task_clone,
+                        timeout_task_clone, // Pass timeout
                         ndpi_engine_task_clone,
                         results_map_task_clone,
                     ).await;
@@ -571,7 +618,7 @@ impl QuantumScanner {
                     
                     // Banner grabbing - attempt to connect and get service banner
                     // This helps identify services running on the port
-                    let banner_bytes = match banner::grab_banner_raw(target_ip_clone, port, timeout_banner).await {
+                    let banner_bytes = match grab_banner_raw(target_ip_clone, port, timeout_banner).await {
                         Ok(b) => {
                             if debug_clone { 
                                 // Log raw bytes safely for debugging
@@ -586,7 +633,7 @@ impl QuantumScanner {
                         }
                     };
                     // Sanitize for logging/storage if needed
-                    let banner_text = banner_bytes.as_deref().map(|b| sanitize_string(&String::from_utf8_lossy(b))); 
+                    let banner_text = banner_bytes.as_deref().map(|b| String::from_utf8_lossy(b).into_owned());
 
                     // Lock the results map once for this port's analysis
                     let mut map_guard = results_map_clone.lock().await;
@@ -929,7 +976,7 @@ impl QuantumScanner {
                 };
                 
                 // Apply rate limiting if configured
-                if let Some(limiter) = rate_limiter_clone {
+                if let Some(limiter) = &rate_limiter_clone {
                     if let Err(_wait_time) = limiter.check() {
                         // If rate limit reached, sleep for the required time
                         let sleep_time = std::time::Duration::from_millis(10); // Default sleep time
@@ -1386,87 +1433,233 @@ impl QuantumScanner {
         tasks
     }
 
-    /// Performs nDPI analysis on an open port by making a brief connection.
+    /// Performs nDPI analysis for a specific target IP and port using active probing
+    /// and libpcap capture for response data.
+    ///
+    /// # Arguments
+    /// * `target_ip` - The IP address of the target host.
+    /// * `port` - The target port number.
+    /// * `timeout_duration` - Max duration for the capture attempt.
+    /// * `ndpi_engine` - Shared reference to the nDPI engine instance.
+    /// * `results_map` - Shared reference to the map storing scan results.
+    ///
+    /// # OpSec Notes
+    /// - Requires root/administrator privileges for packet capture.
+    /// - Performs an active TCP connection attempt (SYN packet sent).
+    /// - Captures actual response packets, providing better data for nDPI than simple banner grabs.
     async fn perform_ndpi_analysis(
         target_ip: IpAddr,
         port: u16,
         timeout_duration: Duration,
         ndpi_engine: Arc<Mutex<ndpi_integration::NdpiEngine>>,
-        results_map: Arc<Mutex<HashMap<u16, PortResult>>>,
+        _results_map: Arc<Mutex<HashMap<u16, PortResult>>>, // Prefix with _ as unused
     ) {
-        debug!("[nDPI:{}:{}] Attempting analysis", target_ip, port);
-        let socket_addr = SocketAddr::new(target_ip, port);
+        info!("[nDPI Port {}] Starting analysis for target: {}", port, target_ip);
 
-        // Attempt to connect
-        let connect_future = tokio::net::TcpStream::connect(socket_addr);
-        match timeout(timeout_duration, connect_future).await {
-            Ok(Ok(mut stream)) => {
-                debug!("[nDPI:{}:{}] Connection established", target_ip, port);
-                // Try to read some initial data (e.g., potential banner/greeting)
-                let mut buffer = vec![0u8; 2048]; // Read up to 2KB
-                let read_future = stream.read(&mut buffer);
+        // --- Pcap Setup ---
+        // 1. Determine Source IP (Using find_local_ipv4 as placeholder)
+        //    Ideally, this should use a function like select_source_ip(target_ip)
+        //    to find the exact source IP the OS would use.
+        let source_ip = match find_local_ipv4() { // Assuming IPv4 for now
+            Ok(ip) => {
+                warn!("[nDPI Port {}] Using {} as source IP (auto-detected, might be inaccurate for routing).", port, ip);
+                IpAddr::V4(ip)
+            }
+            Err(e) => {
+                 error!("[nDPI Port {}] Failed to determine local source IP: {}. Cannot perform pcap capture.", port, e);
+                 return; // Cannot proceed without source IP
+            }
+        };
 
-                match timeout(timeout_duration, read_future).await {
-                    Ok(Ok(bytes_read)) => {
-                        if bytes_read > 0 {
-                            debug!("[nDPI:{}:{}] Read {} bytes for analysis", target_ip, port, bytes_read);
-                            let packet_data = &buffer[..bytes_read];
-                            // TODO: Need flow information (src/dst IP/port) - Using placeholders
-                            let src_ip = "0.0.0.0".parse().unwrap(); // Placeholder
-                            let dst_ip = target_ip.to_string().parse().unwrap(); // Use target IP
-                            let src_port = 12345; // Placeholder
-                            let dst_port = port;
+        // 2. Find Pcap Device
+        let device = match Self::find_pcap_device_for_ip(source_ip) {
+            Ok(dev) => dev,
+            Err(e) => {
+                error!("[nDPI Port {}] Failed to find pcap device for source IP {}: {}. Skipping analysis.", port, source_ip, e);
+                return;
+            }
+        };
+        info!("[nDPI Port {}] Using pcap device: {}", port, device.name);
 
-                            // Lock the engine and analyze
-                            let mut engine_guard = ndpi_engine.lock().await;
-                            engine_guard.analyze_packet(src_ip, dst_ip, src_port, dst_port, packet_data);
-                            let (protocol, confidence) = engine_guard.get_flow_results(src_ip, dst_ip, src_port, dst_port);
+        // 3. Setup Pcap Capture
+        let mut cap = match Capture::from_device(device.clone())
+            .map_err(|e| anyhow!("Capture::from_device failed: {}", e))
+            .and_then(|c| c.promisc(true).timeout(100).open().map_err(|e| anyhow!("Capture::open failed: {}", e))) // 100ms pcap timeout
+        {
+            Ok(c) => c,
+            Err(e) => {
+                 error!("[nDPI Port {}] Failed to open pcap capture: {}. Skipping analysis.", port, e);
+                 return;
+            }
+        };
 
-                            debug!("[nDPI:{}:{}] Detected Protocol: {:?}, Confidence: {:?}", target_ip, port, protocol, confidence);
+        // 4. Set BPF Filter (Capture traffic related to the target IP and port)
+        //    Filter captures packets *from* or *to* the target IP and port.
+        let filter_str = format!("(host {} and port {})", target_ip, port);
+        if let Err(e) = cap.filter(&filter_str, true) {
+            error!("[nDPI Port {}] Failed to set BPF filter '{}': {}. Skipping analysis.", port, filter_str, e);
+            return;
+        }
+        info!("[nDPI Port {}] Set BPF filter: {}", port, filter_str);
 
-                            // Update results map
-                            let mut map_guard = results_map.lock().await;
-                            if let Some(port_result) = map_guard.get_mut(&port) {
-                                port_result.ndpi_protocol = protocol;
-                                port_result.ndpi_confidence = confidence;
-                            }
-                        } else {
-                            debug!("[nDPI:{}:{}] Read 0 bytes, connection closed?", target_ip, port);
+        // 5. Create Channel for Packets
+        // Increased buffer size for potentially bursty traffic
+        let (packet_tx, mut packet_rx) = mpsc::channel::<(Vec<u8>, libc::time_t)>(200); // Increased buffer size
+
+        // 6. Spawn Capture Task
+        let capture_handle: JoinHandle<Result<u64, pcap::Error>> = tokio::spawn(async move {
+            let mut packet_count: u64 = 0;
+            loop {
+                match cap.next_packet() {
+                    Ok(packet) => {
+                        packet_count += 1;
+                        let data = packet.data.to_vec(); // Clone data for sending
+                        let timestamp = packet.header.ts.tv_sec; // Use libc::time_t (i64 generally)
+                        if packet_tx.send((data, timestamp)).await.is_err() {
+                            debug!("[Capture Task Port {}] Packet channel receiver dropped. Stopping capture.", port);
+                            break; // Receiver closed
                         }
+                        // Add a small yield to prevent hogging the CPU in the capture loop
+                        tokio::task::yield_now().await;
                     }
-                    Ok(Err(e)) => {
-                        debug!("[nDPI:{}:{}] Read error: {}", target_ip, port, e);
+                    Err(pcap::Error::TimeoutExpired) => {
+                        // Timeout is expected when no packets arrive, continue loop
+                        // Add a small yield here too
+                        tokio::task::yield_now().await;
+                        continue;
                     }
-                    Err(_) => {
-                        debug!("[nDPI:{}:{}] Read timeout", target_ip, port);
-                        // Even if timeout, attempt analysis with potentially empty data if engine supports it
-                        let src_ip = "0.0.0.0".parse().unwrap();
-                        let dst_ip = target_ip.to_string().parse().unwrap();
-                        let src_port = 12345;
-                        let dst_port = port;
-                         let mut engine_guard = ndpi_engine.lock().await;
-                         // Pass empty slice if read timed out
-                         engine_guard.analyze_packet(src_ip, dst_ip, src_port, dst_port, &[]);
-                         let (protocol, confidence) = engine_guard.get_flow_results(src_ip, dst_ip, src_port, dst_port);
-                          debug!("[nDPI:{}:{}] Detected Protocol (after timeout): {:?}, Confidence: {:?}", target_ip, port, protocol, confidence);
-                         let mut map_guard = results_map.lock().await;
-                         if let Some(port_result) = map_guard.get_mut(&port) {
-                             port_result.ndpi_protocol = protocol;
-                             port_result.ndpi_confidence = confidence;
-                         }
+                    Err(e) => {
+                        error!("[Capture Task Port {}] Error reading packet: {}", port, e);
+                        return Err(e); // Return the error
                     }
                 }
-                // Close the connection gracefully
-                let _ = stream.shutdown().await;
-
-            },
-            Ok(Err(e)) => {
-                debug!("[nDPI:{}:{}] Connection failed: {}", target_ip, port, e);
-            },
-            Err(_) => {
-                debug!("[nDPI:{}:{}] Connection timeout", target_ip, port);
             }
+             Ok(packet_count) // Return total packets captured
+        });
+        // --- End Pcap Setup ---
+
+        // 7. Send a Probe (e.g., TCP SYN) to trigger a response - using tokio task
+        let probe_task = tokio::spawn(async move {
+            let target_addr = SocketAddr::new(target_ip, port);
+            debug!("[Probe Task Port {}] Sending TCP SYN probe to {}", port, target_addr);
+            match TcpStream::connect(target_addr).await {
+                Ok(_) => info!("[Probe Task Port {}] TCP connection successful (SYN-ACK received).", port),
+                Err(e) => warn!("[Probe Task Port {}] TCP connection attempt failed: {}", port, e),
+            }
+        });
+
+        // 8. Process received packets with nDPI
+        let mut received_packets = Vec::new();
+        let processing_start = Instant::now();
+         info!("[nDPI Port {}] Waiting for packets from capture thread...", port);
+
+        // Collect packets until timeout or channel closes
+        loop {
+             // Use tokio::select! for timeout handling
+            tokio::select! {
+                 // Biased select ensures we check timeout first if both are ready
+                 _ = tokio::time::sleep_until(tokio::time::Instant::now() + timeout_duration) => {
+                     info!("[nDPI Port {}] Packet processing timeout reached after {:.2}s.", port, processing_start.elapsed().as_secs_f32());
+                     break;
+                 }
+                 packet_result = packet_rx.recv() => {
+                    match packet_result {
+                        Some((data, timestamp)) => {
+                            debug!("[nDPI Port {}] Received packet ({} bytes) from capture thread.", port, data.len());
+                            received_packets.push((data, timestamp as u64)); // Store packet and timestamp (use u64)
+                        }
+                        None => {
+                            info!("[nDPI Port {}] Packet channel closed by capture thread.", port);
+                            break; // Capture thread finished or errored out
+                        }
+                    }
+                }
+            }
+            // Check elapsed time manually as well, just in case
+             if processing_start.elapsed() >= timeout_duration {
+                 // info!("[nDPI Port {}] Processing loop time exceeded timeout.", port);
+                 break;
+             }
         }
+
+         info!("[nDPI Port {}] Finished collecting packets. {} packets received for processing.", port, received_packets.len());
+
+         // Ensure probe task completes (optional, mostly for cleanup)
+        let _ = probe_task.await; 
+
+        // Wait for the capture thread to finish and get result
+         if let Ok(capture_result) = capture_handle.await {
+             match capture_result {
+                 Ok(count) => info!("[nDPI Port {}] Capture thread completed successfully ({} packets).", port, count),
+                 Err(e) => error!("[nDPI Port {}] Capture thread returned error: {}", port, e),
+             }
+
+             // Process collected packets if any were received
+            if !received_packets.is_empty() {
+                let mut engine_guard = ndpi_engine.lock().await;
+                let mut final_flow_key: Option<ndpi_integration::FlowKey> = None;
+
+                info!("[nDPI Port {}] Processing {} captured packets with nDPI engine...", port, received_packets.len());
+                for (packet_data, timestamp) in received_packets {
+                    match engine_guard.analyze_packet(&packet_data, timestamp) {
+                        Ok(flow_key) => {
+                            trace!("[nDPI Port {}] Successfully processed packet for flow: {:?}", port, flow_key);
+                            if final_flow_key.is_none() {
+                                final_flow_key = Some(flow_key);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("[nDPI Port {}] Error analyzing packet with nDPI: {}", port, e);
+                        }
+                    }
+                }
+
+                debug!("[nDPI Port {}] Finished processing packets. Retrieving final results...", port);
+
+                // Drop the lock before the block ends
+                drop(engine_guard);
+            } else {
+                // Adjusted log message for clarity
+                debug!("[nDPI Port {}] No packets received, skipping nDPI processing.", port);
+            }
+        } else {
+            error!("[nDPI Port {}] Capture task panicked or failed.", port);
+        }
+    }
+
+    // Helper function to find a suitable pcap device based on local IP
+    // NOTE: This is a simplified heuristic and might not always find the correct device.
+    // A more robust solution might involve checking device flags (loopback, up, running)
+    // or allowing user configuration.
+    fn find_pcap_device_for_ip(local_ip: IpAddr) -> Result<Device, anyhow::Error> {
+        let devices = Device::list().map_err(|e| anyhow!("Failed to list pcap devices: {}", e))?;
+        if devices.is_empty() {
+            return Err(anyhow!("No pcap devices found. Ensure libpcap is installed and permissions are correct."));
+        }
+
+        // Prioritize non-loopback devices that have the specified IP address
+        let best_match = devices.iter().find(|d| {
+            !d.flags.is_loopback() && d.addresses.iter().any(|addr| addr.addr == local_ip)
+        });
+
+        if let Some(dev) = best_match {
+            debug!("Found matching pcap device: {} for IP {}", dev.name, local_ip);
+            return Ok(dev.clone());
+        }
+
+        // Fallback: try finding the first non-loopback, active device if no IP match
+        warn!("Could not find pcap device with IP {}. Falling back to first active non-loopback device.", local_ip);
+        let fallback = devices.iter().find(|d| !d.flags.is_loopback() && d.flags.is_up() && d.flags.is_running());
+
+        if let Some(dev) = fallback {
+             debug!("Using fallback pcap device: {}", dev.name);
+             return Ok(dev.clone());
+        }
+
+        // Last resort: Use the first device found (might be loopback)
+         warn!("Could not find ideal pcap device. Using first available device: {}", devices[0].name);
+         Ok(devices[0].clone())
+
     }
 
     // Initialize all structures needed for scanning

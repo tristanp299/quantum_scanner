@@ -6,6 +6,15 @@ use serde::{Serialize, Deserialize};
 use thiserror::Error;
 use std::time::Duration;
 
+/// Define NdpiRisk struct here as it's used across modules
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NdpiRisk {
+    /// Numeric score representing the risk level.
+    pub score: u32,
+    /// Descriptive name of the risk (e.g., "Malicious Traffic", "Excessive Connections").
+    pub name: String,
+}
+
 /// ScanType defines the different techniques that can be used for port scanning
 ///
 /// Each scan type has different characteristics in terms of stealth, accuracy,
@@ -275,40 +284,33 @@ pub struct PortResult {
     /// OpSec note: Banner grabbing is easily logged.
     pub banner: Option<String>,
     
-    /// Operating system guess based on characteristics observed from this port/service
-    /// (e.g., TCP/IP stack fingerprinting variations, specific service behaviors).
-    /// Often less reliable than dedicated OS fingerprinting scans.
+    /// OS fingerprint guess based on responses observed on this port.
     pub os_guess: Option<String>,
     
-    /// Timestamp when this specific port was scanned. Useful for correlating logs
-    /// and understanding scan duration.
+    /// Timestamp when the scan for this specific port concluded.
+    #[serde(with = "chrono::serde::ts_milliseconds")]
     pub scan_time: DateTime<Utc>,
     
-    /// Security assessment of the service configuration on this port. This could include
-    /// checks for default credentials, weak configurations, adherence to best practices, etc.
-    /// (e.g., "SSH allows password authentication", "HTTP missing security headers").
+    /// Overall assessment of the security implications of this port/service.
+    /// E.g., "High risk: Outdated OpenSSH version with known exploits".
     pub security_posture: Option<String>,
     
-    /// List of detected anomalies in responses or behavior for this port. Could indicate
-    /// honeypots, intrusion detection/prevention systems (IDS/IPS), rate limiting,
-    /// or other non-standard behavior designed to deceive or block scanners.
+    /// Any unusual or unexpected behavior observed during scanning this port.
+    /// E.g., "Unexpected RST packet during SYN scan", "Non-standard HTTP header".
     pub anomalies: Vec<String>,
     
-    /// Analysis of response timing (latency, jitter) for this port. Unusual timing
-    /// might suggest network filtering, virtualization overhead, geographic distance,
-    /// or specific server-side processing delays.
-    pub timing_analysis: Option<String>,
+    /// Analysis of response times (RTT) which can sometimes infer network distance
+    /// or server load.
+    pub timing_analysis: Option<String>, // Placeholder, could be struct with avg/min/max RTT
     
-    /// Detailed service information beyond basic version. Could include specific
-    /// configurations, enabled modules/features, authentication methods supported, etc.
-    /// Requires more in-depth service-specific probing.
-    pub service_details: Option<HashMap<String, String>>,
+    /// Additional details specific to the detected service (e.g., SMB shares, SNMP info).
+    /// Could be a map or a specific enum/struct.
+    pub service_details: Option<serde_json::Value>, // Use JSON Value for flexibility
 
-    /// Negotiated TLS protocol version if SSL/TLS scan was performed (e.g., "TLSv1.3").
-    /// Useful for assessing security configuration (older TLS versions are insecure).
+    /// TLS protocol version if detected (e.g., "TLSv1.2", "TLSv1.3").
     pub tls_protocol_version: Option<String>,
     
-    /// Final consolidated port status, calculated based on all scan types.
+    /// Final determined status for the port considering all scan types performed.
     /// This field is used to determine the overall status of the port for reporting.
     /// It prioritizes Open > OpenFiltered > other statuses.
     pub final_status: PortStatus,
@@ -324,11 +326,13 @@ pub struct PortResult {
     /// providing more detailed and accurate information about responses for each technique.
     pub tcp_reasons: HashMap<ScanType, String>,
 
-    /// Protocol guess from nDPI analysis.
-    pub ndpi_protocol: Option<String>,
+    /// Detailed protocol information derived from nDPI analysis.
+    /// Contains protocol IDs, names, category, risk, hostname, etc.
+    pub ndpi_protocol: Option<NDPIProtocolInfo>,
 
-    /// Confidence level of the nDPI protocol guess (0.0 - 1.0).
-    pub ndpi_confidence: Option<f32>,
+    /// Confidence level of the nDPI detection (placeholder).
+    /// Currently uses String to match output.rs expectation, could be f32 later.
+    pub ndpi_confidence: Option<String>,
 }
 
 impl Default for PortResult {
@@ -353,8 +357,8 @@ impl Default for PortResult {
             final_status: PortStatus::Filtered, // Default to Filtered
             reason: None, // Default to None
             tcp_reasons: HashMap::new(),
-            ndpi_protocol: None,
-            ndpi_confidence: None,
+            ndpi_protocol: None, // Initialize renamed field
+            ndpi_confidence: None, // Initialize new field
         }
     }
 }
@@ -1060,5 +1064,54 @@ impl ScanMetrics {
         self.scan_time_ms = 0;
         self.discovery_time_ms = 0;
         self.service_id_time_ms = 0;
+    }
+}
+
+/// Represents detailed protocol information obtained from nDPI analysis.
+/// Add Serialize and Deserialize derives to fix errors E0277
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NDPIProtocolInfo {
+    /// Master protocol identifier (e.g., Ethernet, IP).
+    pub master_protocol_id: u16,
+    /// Application protocol identifier (e.g., HTTP, DNS).
+    pub application_protocol_id: u16,
+    /// Protocol identifier for tunneling protocols (if any).
+    pub tunnel_protocol_id: u16, // Added field for tunnel info
+    /// High-level name of the detected protocol (e.g., "HTTP", "TLS").
+    pub protocol_name: String,
+    /// Functional category of the protocol (e.g., "Web", "Messaging", "Security").
+    pub category_name: String,
+    /// Indicates if the detected protocol is typically encrypted.
+    pub is_encrypted: bool,
+    /// Confidence level of the detection (e.g., Certain, Likely, Possible).
+    pub confidence: NdpiConfidence,
+    /// Risk associated with the protocol or flow.
+    pub risk: Option<NdpiRisk>,
+    /// Raw risk value from nDPI (for reference).
+    pub raw_risk_value: Option<u32>,
+    /// Hostname associated with the protocol
+    pub hostname: Option<String>,
+    // Removed category_id, app_protocol_name, protocol_stack as they are redundant or handled differently
+}
+
+/// Enum representing the confidence level of nDPI detection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NdpiConfidence {
+    Certain,
+    Likely,
+    Possible,
+    Unknown, // Default or when confidence is not applicable
+}
+
+// Conversion from nDPI confidence enum/value if available.
+// This is a placeholder implementation assuming ndpi_confidence_t maps 0-3.
+impl From<u32> for NdpiConfidence { // Or from the actual C enum type if available in bindings
+    fn from(val: u32) -> Self {
+        match val { // Adjust values based on actual nDPI enum definitions
+            0 => NdpiConfidence::Certain, // Assuming 0 maps to highest confidence
+            1 => NdpiConfidence::Likely,
+            2 => NdpiConfidence::Possible,
+            _ => NdpiConfidence::Unknown, // Default to Unknown
+        }
     }
 } 

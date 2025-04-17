@@ -737,7 +737,7 @@ build_project() {
         export CARGO_HTTP_SSL_NO_VERIFY=true
         
         # Build with default features and insecure-tls
-        cargo build --release
+        cargo build -v --release
         BUILD_RESULT=$?
         
         # Restore original Cargo.toml regardless of result
@@ -950,7 +950,7 @@ apply_binary_hardening() {
     # Strip binary if enabled
     if [ "$STRIP_BINARY" = true ]; then
         echo -e "${BLUE}[*] Stripping debug symbols...${NC}"
-        strip -s ./quantum_scanner 2>/dev/null || true
+        strip -v -s ./quantum_scanner 2>/dev/null || true
     fi
     
     # Apply UPX compression if enabled

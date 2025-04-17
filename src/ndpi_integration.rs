@@ -2,517 +2,513 @@
 //!
 //! This module provides integration with the nDPI deep packet inspection library
 //! for advanced protocol detection and service identification.
-//! 
+//!
 //! nDPI is a powerful library that can identify over 280 protocols and applications
 //! based on packet inspection. This implementation provides full access to all
 //! supported protocols without limiting functionality for comprehensive service detection.
 
 use std::collections::HashMap;
-use std::ffi::CStr;
-use std::sync::RwLock;
-use log::{debug, info, warn};
-use serde::{Serialize, Deserialize};
-use anyhow::{Result, anyhow};
-use lazy_static::lazy_static;
+use std::ffi::{CStr}; // Removed unused CString
+use std::os::raw::{c_char};
+use std::ptr;
+use std::net::IpAddr;
+use log::{debug, warn, error, info, trace};
+use std::convert::TryInto;
+use anyhow::{anyhow, Result};
+use etherparse::SlicedPacket; // Used for packet parsing
+use etherparse::IpNumber; // Specific enum for IP protocol number
+use serde::{Deserialize, Serialize};
+use std::mem;
+use crate::models::{NDPIProtocolInfo, NdpiRisk, NdpiConfidence}; // Import structs defined in models.rs
+use crate::ndpi_sys as sys; // Use re-exported items from ndpi_sys where possible
+use crate::ndpi_bindings; // Use direct bindings when needed
+use crate::ndpi_bindings::ndpi_init_prefs; // Import ndpi_init_prefs directly
 
-// Use our internal nDPI sys bindings
-use crate::ndpi_sys as sys;
+/// Represents the 5-tuple key for identifying a network flow.
+/// Used as the key in the nDPI flow cache.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FlowKey {
+    /// Source IP address
+    pub src_ip: IpAddr,
+    /// Destination IP address
+    pub dst_ip: IpAddr,
+    /// Source port number
+    pub src_port: u16,
+    /// Destination port number
+    pub dst_port: u16,
+    /// IP protocol number (e.g., 6 for TCP, 17 for UDP)
+    pub protocol: u8,
+}
+
+/// Information about a tracked network flow.
+#[derive(Debug, Clone)]
+struct FlowInfo {
+    /// Pointer to the nDPI flow structure associated with this flow.
+    ndpi_flow: *mut sys::ndpi_flow_struct,
+    /// The last detected protocol information for this flow.
+    detected_protocol: Option<NDPIProtocolInfo>,
+    /// Timestamp when the last packet for this flow was seen (milliseconds).
+    last_seen_timestamp_ms: u64,
+}
 
 /// Wrapper for nDPI detection functionality with full protocol support
 pub struct NdpiEngine {
-    // The nDPI detection module
+    /// The nDPI detection module handle (pointer)
     detection_module: *mut sys::ndpi_detection_module_struct,
-    // Map of protocol IDs to their names
-    protocols: HashMap<u32, String>,
-    // Track flow packet count for multi-packet analysis
-    flow_packet_count: usize,
-    // Version info for the nDPI library
+    /// Map of protocol IDs (using u32) to their names
+    protocols: HashMap<sys::ndpi_protocol_id_t, String>,
+    /// Version info for the nDPI library
     version_info: String,
-    // Flow tracking for analysis
-    flows: HashMap<String, (u32, u32)>, // Flow key -> (proto_id, data_len)
+    /// Cache of active flows being tracked by nDPI.
+    /// Keys are FlowKey (5-tuple), values are wrappers managing ndpi_flow_struct pointers.
+    flow_cache: HashMap<FlowKey, FlowInfo>,
+    /// Internal nDPI structure pointer, likely related to protocol definitions.
+    ndpi_struct_protocols: *mut ndpi_bindings::ndpi_protocol, // Use type from bindings
 }
 
-/// Protocol identification result from nDPI
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NDPIProtocolInfo {
-    /// Main protocol name
-    pub protocol_name: String,
-    /// Application protocol name (if applicable)
-    pub app_protocol_name: Option<String>,
-    /// Confidence score (0.0-1.0)
-    pub confidence: f32,
-    /// Protocol category
-    pub category: String,
-    /// Whether the protocol uses encryption
-    pub is_encrypted: bool,
-    /// The port used by the protocol (if can be determined)
-    pub probable_port: Option<u16>,
-    /// Protocol risk score (if available)
-    pub risk_score: Option<u32>,
-    /// Additional metadata about the protocol (if available)
-    pub metadata: HashMap<String, String>,
-}
 
-// Global singleton instance for efficient reuse
-lazy_static! {
-    static ref NDPI_INSTANCE: RwLock<Option<NdpiEngine>> = RwLock::new(None);
-}
+// RAII wrapper removed as direct flow management is used in cache
 
-// Safety: We need these to be Send + Sync for use in async contexts
-// This is safe because we ensure proper synchronization when accessing the detector
+// Safety: The detection_module pointer is managed correctly via new/drop.
+// The flow_cache HashMap requires careful handling if NdpiEngine is used across threads,
+// but the primary usage pattern involves locking the Arc<Mutex<NdpiEngine>> in scanner.rs.
 unsafe impl Send for NdpiEngine {}
 unsafe impl Sync for NdpiEngine {}
 
-impl NdpiEngine {
-    /// Create a new nDPI detector instance with full protocol support
-    ///
-    /// # Returns
-    /// * `Result<Self>` - The detector or an error
-    pub fn new() -> Result<Self> {
-        // Initialize nDPI detection module
-        unsafe {
-            // Create detection module with full protocol support
-            let detection_module = sys::ndpi_init_detection_module(0);
-            if detection_module.is_null() {
-                return Err(anyhow!("Failed to initialize nDPI detection module"));
-            }
-
-            // Enable all protocols for detection - no limitations
-            sys::ndpi_set_all_protocols(detection_module, 1);
-            
-            // Set detection to include all possible protocols
-            sys::ndpi_set_detection_preferences(detection_module, 
-                sys::ndpi_detection_preference_values::ndpi_deep_protocol_inspection as i32);
-            
-            // Build complete protocol map for all supported protocols
-            let mut protocols = HashMap::new();
-            let num_protocols = sys::ndpi_get_num_supported_protocols(detection_module);
-            
-            for i in 0..num_protocols {
-                let proto_name = sys::ndpi_get_proto_name(detection_module, i);
-                if !proto_name.is_null() {
-                    let proto_name_str = CStr::from_ptr(proto_name).to_string_lossy().to_string();
-                    protocols.insert(i as u32, proto_name_str);
-                }
-            }
-
-            // Get nDPI version info
-            let version = sys::ndpi_revision();
-            let version_str = if !version.is_null() {
-                CStr::from_ptr(version).to_string_lossy().to_string()
-            } else {
-                "unknown version".to_string()
-            };
-
-            info!("nDPI {} initialized with {} supported protocols", 
-                  version_str, protocols.len());
-
-            Ok(Self {
-                detection_module,
-                protocols,
-                flow_packet_count: 0,
-                version_info: version_str,
-                flows: HashMap::new(),
-            })
-        }
-    }
-    
-    /// Get a global instance of the detector
-    pub fn get_instance() -> Result<Self> {
-        let mut instance_lock = NDPI_INSTANCE.write().unwrap();
-        
-        if instance_lock.is_none() {
-            *instance_lock = Some(Self::new()?);
-        }
-        
-        // Since we can't simply clone the instance due to C pointers,
-        // we'll create a new one if needed
-        Self::new()
-    }
-
-    /// Get the nDPI library version
-    pub fn get_version(&self) -> &str {
-        &self.version_info
-    }
-
-    /// Get the total number of supported protocols
-    pub fn get_protocol_count(&self) -> usize {
-        self.protocols.len()
-    }
-    
-    /// Get protocol name for a given ID
-    pub fn get_protocol_name(&self, proto_id: u32) -> Option<String> {
-        self.protocols.get(&proto_id).cloned()
-    }
-    
-    /// List all supported protocols
-    pub fn list_all_protocols(&self) -> Vec<String> {
-        self.protocols.values().cloned().collect()
-    }
-
-    /// Detect protocol from packet data with comprehensive analysis
-    ///
-    /// # Arguments
-    /// * `data` - The packet data to analyze
-    /// * `src_port` - Source port
-    /// * `dst_port` - Destination port
-    /// * `is_tcp` - Whether the packet is TCP (vs UDP)
-    ///
-    /// # Returns
-    /// * `Result<NDPIProtocolInfo>` - Protocol information or error
-    pub fn detect_protocol(&mut self, data: &[u8], src_port: u16, dst_port: u16, is_tcp: bool) -> Result<NDPIProtocolInfo> {
-        if data.is_empty() {
-            return Err(anyhow!("Empty packet data"));
-        }
-        
-        unsafe {
-            // Create flow for this packet
-            let mut flow = sys::ndpi_flow_struct::new();
-            
-            // Initialize source and destination IDs for flow tracking
-            let mut src_id: u32 = 0;
-            let mut dst_id: u32 = 0;
-            
-            // Create an ndpi_packet_struct
-            let mut packet = sys::ndpi_packet_struct {
-                iph: std::ptr::null_mut(),
-                iphv6: std::ptr::null_mut(),
-                tcp: std::ptr::null_mut(),
-                udp: std::ptr::null_mut(),
-                payload: data.as_ptr() as *const u8,
-                payload_packet_len: data.len() as u16,
-                l4_packet_len: data.len() as u16,
-                l3_packet_len: (data.len() + 40) as u16, // Add typical header size
-                l4_protocol: if is_tcp { 6 } else { 17 }, // 6=TCP, 17=UDP
-                ..Default::default()
-            };
-            
-            // Process the packet with full analysis
-            let proto_id = sys::ndpi_detection_process_packet(
-                self.detection_module,
-                &mut flow as *mut _,
-                &mut packet as *mut _,
-                0, // current time
-                &mut src_id,
-                &mut dst_id
-            );
-            
-            // Track flow packet count for multi-packet analysis
-            self.flow_packet_count += 1;
-            
-            // Get protocol name
-            let proto_name = if proto_id != 0 {
-                self.protocols.get(&proto_id)
-                    .cloned()
-                    .unwrap_or_else(|| "unknown".to_string())
-            } else {
-                // If first packet didn't give definitive result, try getting a guess
-                let guess = sys::ndpi_detection_giveup(
-                    self.detection_module,
-                    &mut flow as *mut _,
-                    1, // Provide a hint that we want the best guess
-                    &mut src_id,
-                    &mut dst_id
-                );
-                
-                if guess != 0 && guess != proto_id {
-                    self.protocols.get(&guess)
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".to_string())
-                } else {
-                    "unknown".to_string()
-                }
-            };
-            
-            // Get protocol category
-            let category_id = sys::ndpi_get_proto_category(self.detection_module, proto_id);
-            let category_name = sys::ndpi_category_get_name(self.detection_module, category_id);
-            let category = if !category_name.is_null() {
-                CStr::from_ptr(category_name).to_string_lossy().to_string()
-            } else {
-                "Unknown".to_string()
-            };
-            
-            // Check if the protocol is encrypted
-            let is_encrypted = match proto_name.as_str() {
-                "TLS" | "SSL" | "SSH" | "HTTPS" | "FTPS" | "SFTP" | "IMAPS" | "SMTPS" | "POPS" => true,
-                _ => sys::ndpi_is_encrypted_proto(self.detection_module, proto_id) != 0
-            };
-            
-            // Determine app protocol if this is a tunneled protocol
-            let app_protocol_name = if proto_id == sys::NDPI_PROTOCOL_TLS as u32 || 
-                                    proto_id == sys::NDPI_PROTOCOL_SSL as u32 {
-                // Call the wrapped function via the sys module
-                let app_proto_id = sys::wrapped_ndpi_get_app_protocol(self.detection_module, &mut flow);
-                if app_proto_id != 0 && app_proto_id != proto_id {
-                    self.protocols.get(&app_proto_id).cloned()
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            
-            // Store the flow with its detected protocol
-            let flow_key = format!("{}:{}-{}:{}", src_id, src_port, dst_id, dst_port);
-            self.flows.insert(flow_key, (proto_id, data.len() as u32));
-            
-            // Extract metadata if available
-            let metadata = HashMap::new();
-            
-            // Calculate confidence based on packet count and protocol clarity
-            let confidence = if proto_id == 0 {
-                0.3 // Low confidence for unknown
-            } else if self.flow_packet_count < 2 {
-                0.6 // Medium confidence with just one packet
-            } else {
-                0.9 // High confidence with multiple packets
-            };
-            
-            // Determine probable port based on the protocol
-            let probable_port = self.determine_probable_port(proto_name.as_str(), src_port, dst_port);
-            
-            // Return the results
-            Ok(NDPIProtocolInfo {
-                protocol_name: proto_name,
-                app_protocol_name,
-                confidence,
-                category,
-                is_encrypted,
-                probable_port,
-                risk_score: None, // nDPI risk score not used
-                metadata,
-            })
-        }
-    }
-    
-    /// Helper function to determine the probable service port
-    fn determine_probable_port(&self, proto_name: &str, src_port: u16, dst_port: u16) -> Option<u16> {
-        // If one port is a well-known port (<1024) and the other isn't, use the well-known port
-        if src_port < 1024 && dst_port >= 1024 {
-            return Some(src_port);
-        } else if dst_port < 1024 && src_port >= 1024 {
-            return Some(dst_port);
-        }
-        
-        // Otherwise use common port mappings
-        match proto_name.to_uppercase().as_str() {
-            "HTTP" => Some(80),
-            "HTTPS" | "TLS" | "SSL" => Some(443),
-            "SSH" => Some(22),
-            "FTP" | "FTP_CONTROL" => Some(21),
-            "FTP_DATA" => Some(20),
-            "SMTP" => Some(25),
-            "SMTPS" => Some(465),
-            "SUBMISSION" => Some(587),
-            "POP3" => Some(110),
-            "POP3S" => Some(995),
-            "IMAP" => Some(143),
-            "IMAPS" => Some(993),
-            "DNS" => Some(53),
-            "DHCP" => Some(67),
-            "TELNET" => Some(23),
-            "SNMP" => Some(161),
-            "LDAP" => Some(389),
-            "LDAPS" => Some(636),
-            "MYSQL" => Some(3306),
-            "POSTGRES" | "POSTGRESQL" => Some(5432),
-            "REDIS" => Some(6379),
-            "MONGODB" => Some(27017),
-            "RDP" => Some(3389),
-            "VNC" => Some(5900),
-            "SMB" | "SMBV1" | "SMBV23" => Some(445),
-            "NTP" => Some(123),
-            "SIP" => Some(5060),
-            "SIPS" => Some(5061),
-            "RTSP" => Some(554),
-            "RTP" | "RTCP" => None, // Dynamic ports typically
-            "IRC" => Some(6667),
-            "QUIC" => Some(443), // Typically HTTPS over QUIC
-            "ISAKMP" | "IPSEC" => Some(500),
-            "OPENVPN" => Some(1194),
-            "PPTP" => Some(1723),
-            "L2TP" => Some(1701),
-            "MSSQL_TDS" | "TDS" => Some(1433),
-            "NATS" => Some(4222),
-            "MQTT" => Some(1883),
-            "MQTTS" => Some(8883),
-            "KERBEROS" => Some(88),
-            "RADIUS" => Some(1812),
-            "TACACS" => Some(49),
-            "AFP" => Some(548),
-            "BGP" => Some(179),
-            "DHCPV6" => Some(546),
-            "STUN" => Some(3478),
-            "SSDP" => Some(1900),
-            "NETBIOS" => Some(139),
-            "NFS" => Some(2049),
-            "MDNS" => Some(5353),
-            "MEMCACHED" => Some(11211),
-            "RSYNC" => Some(873),
-            "TFTP" => Some(69),
-            "UPNP" => Some(1900),
-            "WEBSOCKET" => Some(80), // Often on HTTP ports
-            _ => None,
-        }
-    }
-
-    /// Analyze a packet for protocol detection
-    pub fn analyze_packet(&mut self, src_ip: std::net::IpAddr, dst_ip: std::net::IpAddr, 
-                         src_port: u16, dst_port: u16, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-        
-        // Try to detect the protocol
-        match self.detect_protocol(data, src_port, dst_port, true) {
-            Ok(protocol_info) => {
-                debug!("Detected protocol: {} (confidence: {:.2})", 
-                      protocol_info.protocol_name, protocol_info.confidence);
-                
-                // Create a unique flow key
-                let flow_key = format!("{}:{}-{}:{}", src_ip, src_port, dst_ip, dst_port);
-                
-                // Get proto_id from name (using first one we find)
-                let proto_id = self.protocols.iter()
-                    .find(|(_, name)| **name == protocol_info.protocol_name)
-                    .map(|(id, _)| *id)
-                    .unwrap_or(0);
-                
-                // Record that we've seen this flow with the detected protocol
-                self.flows.insert(flow_key, (proto_id, data.len() as u32));
-            },
-            Err(e) => {
-                debug!("Protocol detection failed: {}", e);
-                
-                // Even with failed detection, record the flow
-                let flow_key = format!("{}:{}-{}:{}", src_ip, src_port, dst_ip, dst_port);
-                self.flows.insert(flow_key, (0, data.len() as u32));
-            }
-        }
-    }
-    
-    /// Get results for a specific flow
-    pub fn get_flow_results(&self, src_ip: std::net::IpAddr, dst_ip: std::net::IpAddr, 
-                           src_port: u16, dst_port: u16) -> (Option<String>, Option<f32>) {
-        let flow_key = format!("{}:{}-{}:{}", src_ip, src_port, dst_ip, dst_port);
-        
-        if let Some(&(proto_id, _)) = self.flows.get(&flow_key) {
-            // If we have a protocol ID, look up its name
-            if proto_id > 0 {
-                if let Some(proto_name) = self.protocols.get(&proto_id) {
-                    return (Some(proto_name.clone()), Some(0.9));
-                }
-            }
-            
-            // Fall back to port-based guessing
-            match (src_port, dst_port) {
-                (80, _) | (_, 80) => (Some("HTTP".to_string()), Some(0.9)),
-                (443, _) | (_, 443) => (Some("HTTPS".to_string()), Some(0.9)),
-                (22, _) | (_, 22) => (Some("SSH".to_string()), Some(0.9)),
-                (21, _) | (_, 21) => (Some("FTP".to_string()), Some(0.9)),
-                (25, _) | (_, 25) => (Some("SMTP".to_string()), Some(0.9)),
-                (110, _) | (_, 110) => (Some("POP3".to_string()), Some(0.9)),
-                (143, _) | (_, 143) => (Some("IMAP".to_string()), Some(0.9)),
-                _ => (Some("Unknown".to_string()), Some(0.2)),
-            }
-        } else {
-            (None, None)
-        }
-    }
-}
-
-impl Drop for NdpiEngine {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.detection_module.is_null() {
-                sys::ndpi_exit_detection_module(self.detection_module);
-                self.detection_module = std::ptr::null_mut();
-            }
-        }
-    }
-}
-
-/// Helper function to convert nDPI protocol info to service info
-pub fn ndpi_to_service_info(proto_info: NDPIProtocolInfo) -> (String, Option<String>) {
-    // Extract the main protocol name
-    let service_name = proto_info.protocol_name.to_lowercase();
-    
-    // Incorporate application protocol if relevant
-    let version_info = if let Some(app_name) = proto_info.app_protocol_name {
-        Some(format!("{} over {}", app_name, service_name))
-    } else {
-        // If no app protocol, see if we have metadata
-        proto_info.metadata.get("hostname").or_else(|| 
-            proto_info.metadata.get("user_agent")).cloned()
-    };
-    
-    (service_name, version_info)
-}
-
-/// Public function to detect protocol with nDPI
-/// 
-/// # Arguments
-/// * `data` - The packet data to analyze
-/// * `src_port` - Source port (use 0 if unknown)
-/// * `dst_port` - Destination port 
-/// * `is_tcp` - Whether the packet is TCP (vs UDP)
-/// 
-/// # Returns
-/// * `Option<(String, Option<String>)>` - Service name and optional version
-pub fn detect_protocol(data: &[u8], src_port: u16, dst_port: u16, is_tcp: bool) -> Option<(String, Option<String>)> {
-    // Skip empty data
-    if data.is_empty() {
+// Helper function to safely convert C string (char*) to Rust String
+// Takes a *const c_char pointer.
+unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() || *ptr == 0 { // Check for null pointer or empty string
         return None;
     }
-    
-    // Try to get nDPI instance
-    match NdpiEngine::get_instance() {
-        Ok(mut detector) => {
-            // Try to detect the protocol using nDPI
-            match detector.detect_protocol(data, src_port, dst_port, is_tcp) {
-                Ok(proto_info) => {
-                    if proto_info.protocol_name != "unknown" {
-                        debug!("nDPI detected protocol: {} (confidence: {:.2})", 
-                              proto_info.protocol_name, proto_info.confidence);
-                        
-                        // Convert to service info format
-                        Some(ndpi_to_service_info(proto_info))
-                    } else {
-                        None
-                    }
-                },
-                Err(e) => {
-                    debug!("nDPI detection error: {}", e);
-                    None
-                }
-            }
-        },
+    // Basic check for potential invalid pointer (e.g., very low address)
+    let ptr_addr = ptr as usize;
+    if ptr_addr < 0xFFFF {
+        warn!("Potential invalid C string pointer encountered: {:p}", ptr);
+        return None;
+    }
+    // Attempt conversion
+    match CStr::from_ptr(ptr).to_str() {
+        Ok(s) => Some(s.to_string()),
         Err(e) => {
-            warn!("Failed to get nDPI instance: {}", e);
+            error!("Failed to convert CStr to Rust String: {}", e);
             None
         }
     }
 }
 
-/// Get information about nDPI capabilities
-pub fn get_ndpi_info() -> String {
-    match NdpiEngine::get_instance() {
-        Ok(detector) => {
-            format!("nDPI {} - Supporting {} protocols", 
-                   detector.get_version(),
-                   detector.get_protocol_count())
-        },
-        Err(_) => {
-            "nDPI not available".to_string()
+
+impl NdpiEngine {
+    /// Create a new nDPI detector instance with full protocol support.
+    /// Initializes the nDPI library and loads protocol definitions.
+    ///
+    /// # Returns
+    /// * `Result<Self>` - The initialized engine or an error if initialization fails.
+    pub fn new() -> Result<Self> {
+        info!("Initializing nDPI engine...");
+        // Allocate memory for the detection module structure.
+        let detection_module = unsafe {
+            libc::calloc(1, mem::size_of::<sys::ndpi_detection_module_struct>())
+                as *mut sys::ndpi_detection_module_struct
+        };
+
+        // Check if memory allocation failed.
+        if detection_module.is_null() {
+            return Err(anyhow!("Failed to allocate memory for nDPI detection module"));
         }
+
+        // Initialize nDPI library with default preferences
+        // ndpi_init_detection_module requires preferences flags, using default for now
+        // Opsec Note: Review nDPI initialization options (ndpi_init_prefs)
+        // to potentially disable features not needed, reducing attack surface.
+        let prefs: ndpi_init_prefs = 0; // Default preferences - Use directly imported type
+        let ndpi_struct = unsafe { sys::ndpi_init_detection_module(prefs) };
+
+        // Check if initialization failed (returned null pointer)
+        if ndpi_struct.is_null() {
+            return Err(anyhow!("Failed to initialize nDPI detection module"));
+        }
+
+        // --- Get nDPI Version ---
+        // Safely get the nDPI version string after successful initialization
+        let version_ptr = unsafe { sys::ndpi_revision() }; // Get C string pointer for version
+        // Convert C string to Rust String, provide default if conversion fails
+        let version_info = unsafe { cstr_to_string(version_ptr) }.unwrap_or_else(|| "Unknown".to_string());
+        info!("Successfully initialized nDPI (Version: {})", version_info); // Log version
+
+        // --- Placeholder for Protocol Struct Pointer ---
+        // This pointer might be obtained via a specific nDPI function if needed later.
+        // For now, initialize it to null.
+        // Using ndpi_protocol based on bindings check
+        let ndpi_struct_protocols: *mut ndpi_bindings::ndpi_protocol = ptr::null_mut();
+
+        // --- Set default protocol detection preferences ---
+        // ndpi_set_proto_defaults allows setting default ports/behavior per protocol.
+        // We are using the function name suggested by the compiler.
+        // The `protocol_defaults` array would need to be defined and populated
+        // according to nDPI documentation if we wanted custom defaults.
+        // Currently commented out as we don't have specific defaults to set.
+        /*
+        let protocol_defaults: *const sys::ndpi_proto_defaults_t = ptr::null(); // Placeholder
+        let num_defaults: libc::c_uint = 0; // Placeholder
+        unsafe {
+            sys::ndpi_set_proto_defaults(ndpi_struct, protocol_defaults, num_defaults);
+        }
+        info!("Applied default nDPI protocol settings.");
+        */
+
+        // Finalize initialization after setting any custom parameters
+        // This step is crucial for nDPI to build its internal structures.
+        let detection_module = ndpi_struct; // ndpi_init_detection_module returns the pointer
+        if detection_module.is_null() {
+             return Err(anyhow!("Failed to initialize nDPI detection module (returned null)"));
+        }
+
+        // Populate internal protocol map (optional, can be done on demand)
+        let protocols = HashMap::new(); // Initialize empty for now
+
+        info!("nDPI engine initialized successfully.");
+        Ok(Self {
+            detection_module,
+            protocols,
+            version_info,
+            flow_cache: HashMap::new(),
+            ndpi_struct_protocols, // Store null pointer for now
+        })
+    }
+
+    /// Get the nDPI library version string.
+    pub fn get_version(&self) -> &str {
+        &self.version_info
+    }
+
+    /// Get the total number of named protocols loaded from nDPI.
+    pub fn get_protocol_count(&self) -> usize {
+        // This might need adjustment if protocols aren't pre-loaded into self.protocols
+        // Could call ndpi_get_num_supported_protocols if needed.
+        self.protocols.len()
+    }
+
+    /// Get protocol name for a given nDPI protocol ID (u32).
+    pub fn get_protocol_name(&self, proto_id: sys::ndpi_protocol_id_t) -> Option<String> {
+        // If self.protocols is empty, call nDPI function directly
+        if self.protocols.is_empty() {
+             unsafe {
+                let name_ptr = ndpi_bindings::ndpi_get_proto_name(self.detection_module, proto_id as u16);
+                cstr_to_string(name_ptr)
+             }
+        } else {
+            self.protocols.get(&proto_id).cloned()
+        }
+    }
+
+    /// Analyzes a raw network packet, identifies its flow, updates the flow state
+    /// in the cache, and runs nDPI detection on it.
+    ///
+    /// # Arguments
+    /// * `packet_data` - Slice containing the raw packet data (starting from IP header).
+    /// * `timestamp_ms` - The timestamp when the packet was captured (in milliseconds).
+    ///
+    /// # Returns
+    /// * `Ok(FlowKey)` - The key of the flow this packet belongs to (either existing or newly created).
+    /// * `Err(anyhow::Error)` - If parsing fails or nDPI processing encounters an error.
+    pub fn analyze_packet(&mut self, packet_data: &[u8], timestamp_ms: u64) -> Result<FlowKey> {
+        trace!(
+            "NdpiEngine::analyze_packet: Analyzing packet ({} bytes) at timestamp {}",
+            packet_data.len(),
+            timestamp_ms
+        );
+
+        // Parse the packet using etherparse.
+        let packet = SlicedPacket::from_ip(packet_data)
+            .map_err(|e| anyhow!("Failed to parse IP packet using etherparse: {}", e))?;
+
+        // Extract IP protocol, source/destination IPs, and ports to create a FlowKey.
+        let protocol: IpNumber = match &packet.net {
+            Some(etherparse::NetSlice::Ipv4(hdr)) => hdr.header().protocol(),
+            Some(etherparse::NetSlice::Ipv6(hdr)) => hdr.header().next_header(),
+            Some(etherparse::InternetSlice::Arp(_)) => return Err(anyhow!("ARP packet encountered, skipping analysis")),
+            None => return Err(anyhow!("Packet parsing failed: Missing IP header")),
+        };
+
+        let src_ip = match &packet.net {
+            Some(etherparse::NetSlice::Ipv4(hdr)) => IpAddr::V4(hdr.header().source_addr()),
+            Some(etherparse::NetSlice::Ipv6(hdr)) => IpAddr::V6(hdr.header().source_addr()),
+            Some(etherparse::InternetSlice::Arp(_)) => return Err(anyhow!("ARP packet encountered, cannot get source IP")),
+            None => return Err(anyhow!("Packet parsing failed: Missing source IP")),
+        };
+
+        let dst_ip = match &packet.net {
+            Some(etherparse::NetSlice::Ipv4(hdr)) => IpAddr::V4(hdr.header().destination_addr()),
+            Some(etherparse::NetSlice::Ipv6(hdr)) => IpAddr::V6(hdr.header().destination_addr()),
+            Some(etherparse::InternetSlice::Arp(_)) => return Err(anyhow!("ARP packet encountered, cannot get destination IP")),
+            None => return Err(anyhow!("Packet parsing failed: Missing destination IP")),
+        };
+
+        let (src_port, dst_port) = match packet.transport {
+            Some(etherparse::TransportSlice::Tcp(hdr)) => (hdr.source_port(), hdr.destination_port()),
+            Some(etherparse::TransportSlice::Udp(hdr)) => (hdr.source_port(), hdr.destination_port()),
+            _ => (0, 0),
+        };
+
+        let flow_key = FlowKey {
+            src_ip,
+            dst_ip,
+            src_port,
+            dst_port,
+            protocol: protocol.0, // Convert IpNumber to u8
+        };
+        trace!("Packet corresponds to flow: {:?}", flow_key);
+
+        // --- Borrow Checker Fix Start ---
+        // 1. Check if flow exists. If not, create and insert it.
+        let ndpi_flow_ptr = if !self.flow_cache.contains_key(&flow_key) {
+            debug!("Creating new flow entry for: {:?}", flow_key);
+            let ptr = unsafe {
+                libc::calloc(1, mem::size_of::<sys::ndpi_flow_struct>())
+                    as *mut sys::ndpi_flow_struct
+            };
+            if ptr.is_null() {
+                 error!("Failed to allocate memory for nDPI flow struct for flow: {:?}", flow_key);
+                 return Err(anyhow!("Failed to allocate memory for nDPI flow struct"));
+            } else {
+                // Initialize flow struct fields to zero (important!)
+                unsafe { ptr::write_bytes(ptr, 0, 1); }
+                // Insert temporary info, releasing mutable borrow
+                self.flow_cache.insert(flow_key.clone(), FlowInfo {
+                    ndpi_flow: ptr,
+                    detected_protocol: None,
+                    last_seen_timestamp_ms: timestamp_ms,
+                });
+                ptr // Return the newly created pointer
+            }
+        } else {
+             // Flow already exists, get its pointer without holding mutable borrow of cache
+             self.flow_cache.get(&flow_key).unwrap().ndpi_flow
+        };
+
+        // Ensure the pointer is valid before proceeding
+        if ndpi_flow_ptr.is_null() {
+            return Err(anyhow!("Internal error: Flow pointer is null for flow key: {:?}", flow_key));
+        }
+
+        // Update last seen time (needs mutable borrow, but short-lived)
+        if let Some(info) = self.flow_cache.get_mut(&flow_key) {
+             info.last_seen_timestamp_ms = timestamp_ms;
+        } else {
+             // This should not happen if the logic above is correct
+             return Err(anyhow!("Internal error: Flow key {:?} disappeared from cache unexpectedly.", flow_key));
+        }
+        // --- Borrow Checker Fix End ---
+
+        let ip_payload = packet_data;
+        let ip_payload_len = ip_payload.len() as u16;
+
+        // Process the packet using nDPI.
+        let detected_protocol_result = unsafe {
+            sys::ndpi_detection_process_packet(
+                self.detection_module,
+                ndpi_flow_ptr, // Use the pointer obtained earlier
+                ip_payload.as_ptr() as *const libc::c_uchar,
+                ip_payload_len,
+                timestamp_ms
+            )
+        };
+
+        // Get the detailed protocol information from the nDPI flow structure.
+        let detected_protocol: sys::ndpi_protocol = detected_protocol_result; // Result of process_packet
+
+        // Access fields safely from the nDPI flow structure pointer
+        // Read necessary values *before* potentially borrowing self later
+        let (flow_confidence, flow_risk_enum_u64, flow_hostname_ptr, _flow_stack) = unsafe {
+            let flow_ptr = &*ndpi_flow_ptr; // Dereference the known valid pointer
+            (
+                flow_ptr.confidence,
+                flow_ptr.risk, // This is ndpi_risk (u64)
+                flow_ptr.host_server_name.as_ptr() as *const c_char,
+                flow_ptr.detected_protocol_stack // Use correct field name, prefix with _ as unused
+            )
+        };
+
+        // Only update protocol info if nDPI actually detected something
+        if detected_protocol.master_protocol != sys::ndpi_protocol_id_t_NDPI_PROTOCOL_UNKNOWN as u16
+            || detected_protocol.app_protocol != sys::ndpi_protocol_id_t_NDPI_PROTOCOL_UNKNOWN as u16
+        {
+            trace!(
+                "nDPI detected protocol: Master={}, App={}, Category={}",
+                detected_protocol.master_protocol,
+                detected_protocol.app_protocol,
+                detected_protocol.category
+            );
+
+            let protocol_id_for_name = if detected_protocol.app_protocol != sys::ndpi_protocol_id_t_NDPI_PROTOCOL_UNKNOWN as u16 {
+                detected_protocol.app_protocol
+            } else {
+                detected_protocol.master_protocol
+            };
+
+            let protocol_name = unsafe {
+                let name_ptr = ndpi_bindings::ndpi_get_proto_name(self.detection_module, protocol_id_for_name);
+                cstr_to_string(name_ptr)
+            }.unwrap_or_else(|| "Unknown".to_string());
+
+
+            let category_name = unsafe {
+                 let name_ptr = ndpi_bindings::ndpi_category_get_name(self.detection_module, detected_protocol.category);
+                 cstr_to_string(name_ptr)
+             }.unwrap_or_else(|| "Unknown".to_string());
+
+            // Convert hostname C string here
+            let hostname = unsafe { cstr_to_string(flow_hostname_ptr) };
+
+            // --- Borrow Checker Fix: Convert risk *after* releasing mutable borrow ---
+            // Pass the previously extracted flow_risk_enum (u64)
+            // It needs to be converted to sys::ndpi_risk_enum (u32) for convert_risk_enum
+            let risk_info = match flow_risk_enum_u64.try_into() {
+                Ok(risk_enum_u32) => self.convert_risk_enum(risk_enum_u32)?, // Immutable borrow of self here
+                Err(_) => {
+                    warn!("Risk value {} out of range for u32, defaulting to No Risk", flow_risk_enum_u64);
+                    NdpiRisk { score: 0, name: "No Risk (Conversion Error)".to_string() }
+                }
+            };
+            // --- End Borrow Checker Fix ---
+
+            // Create the NdpiProtocolInfo struct using data from models.rs definition
+            let ndpi_info = NDPIProtocolInfo {
+                master_protocol_id: detected_protocol.master_protocol,
+                application_protocol_id: detected_protocol.app_protocol,
+                protocol_name,
+                category_name,
+                confidence: NdpiConfidence::from(flow_confidence), // Convert u32 confidence
+                is_encrypted: false, // Placeholder - ndpi_is_protocol_encrypted was unresolved
+                risk: Some(risk_info), // Wrap in Option
+                hostname,
+                 // Fields from models.rs not directly mapped here (can be added if needed):
+                 tunnel_protocol_id: 0, // Placeholder
+                 raw_risk_value: Some(flow_risk_enum_u64 as u32), // Store raw enum value (cast may truncate)
+            };
+
+            // --- Borrow Checker Fix: Update cache *after* immutable borrow ---
+            // Re-acquire mutable borrow to update the stored info
+            if let Some(info) = self.flow_cache.get_mut(&flow_key) {
+                 info.detected_protocol = Some(ndpi_info);
+                 trace!("Stored protocol info for flow: {:?}", flow_key);
+            } else {
+                 // This really shouldn't happen
+                 error!("Flow key {:?} missing after processing packet.", flow_key);
+            }
+            // --- End Borrow Checker Fix ---
+        } else {
+            trace!("No specific protocol detected by nDPI for this packet.");
+        }
+
+        Ok(flow_key) // Return the original flow key
+    }
+
+    /// Retrieves the detected protocol information for a given flow key.
+    ///
+    /// Returns `Some(NdpiProtocolInfo)` if the flow exists and a protocol has been detected,
+    /// otherwise returns `None`.
+    pub fn get_flow_protocol(&self, flow_key: &FlowKey) -> Option<NDPIProtocolInfo> {
+        self.flow_cache
+            .get(flow_key)
+            .and_then(|info| info.detected_protocol.clone())
+    }
+
+    /// Converts the raw nDPI risk enum value into a structured `NdpiRisk`.
+    ///
+    /// # Arguments
+    /// * `risk_enum`: The raw `ndpi_risk_enum` value from the nDPI flow structure.
+    ///
+    /// # Returns
+    /// * `Result<NdpiRisk>`: The structured risk information or an error if conversion fails.
+    fn convert_risk_enum(&self, risk_enum: sys::ndpi_risk_enum) -> Result<NdpiRisk> {
+        let no_risk_value = sys::ndpi_risk_enum_NDPI_NO_RISK as sys::ndpi_risk_enum;
+        if risk_enum == no_risk_value {
+            return Ok(NdpiRisk { score: 0, name: "No Risk".to_string() });
+        }
+
+        // Convert the numeric risk score (obtained from ndpi_risk_get_score)
+        // into a more descriptive severity level (e.g., "Low", "Medium", "High").
+        // This mapping might need adjustment based on nDPI's scoring ranges.
+        // Prefix with _ as severity is currently unused
+        let _severity = match risk_enum { // risk_enum here is ndpi_risk_enum (u32)
+             0 => "Info".to_string(), // Or "None"
+             1..=30 => "Low".to_string(),
+             31..=60 => "Medium".to_string(),
+             61..=90 => "High".to_string(),
+             _ => "Critical".to_string(), // Scores > 90
+        };
+
+        // Get the string representation of the risk enum (e.g., "NDPI_HTTP_SUSPICIOUS_USER_AGENT")
+        // using the function name suggested by the compiler.
+        let risk_name_ptr = unsafe { sys::ndpi_risk2str(risk_enum) };
+        let risk_name = unsafe { cstr_to_string(risk_name_ptr) }.unwrap_or_else(|| "Unknown Risk".to_string());
+
+
+        // Get the numeric score associated with the risk enum
+        // Using the function name suggested by the compiler.
+        // Note: ndpi_risk2score might take pointers for client/server scores, adjust call if needed.
+        // Let's assume for now it directly returns a combined score or we only need a general score.
+        // We might need to pass pointers to u16 variables if the signature requires it.
+        // Placeholder: Assuming it returns a single score for now.
+        // Correction: ndpi_risk2score expects pointers to write client/server scores.
+        // Need to provide mutable variables and handle the return.
+        let mut client_score: u16 = 0;
+        let mut server_score: u16 = 0;
+        let total_score: u16 = unsafe {
+             // Convert risk_enum (u32) to u64 for ndpi_risk type
+             ndpi_bindings::ndpi_risk2score(risk_enum.into(), &mut client_score, &mut server_score)
+        };
+        // Using total_score for overall severity for simplicity now.
+        let score = total_score; // Use the returned score
+
+        // Create the NdpiRisk struct
+        Ok(NdpiRisk {
+            score: score as u32,
+            name: risk_name,
+        })
+    }
+
+    /// Cleans up nDPI resources when the engine is dropped.
+    ///
+    /// This involves freeing allocated nDPI flow structures in the cache and exiting
+    /// the nDPI detection module.
+    fn cleanup(&mut self) {
+        info!("Cleaning up nDPI engine resources...");
+        // Iterate through the flow cache and free each nDPI flow structure.
+        for (_key, flow_info) in self.flow_cache.drain() {
+            if !flow_info.ndpi_flow.is_null() {
+                // Use ndpi_flow_free (which should use libc::free based on ndpi_sys)
+                sys::ndpi_flow_free(flow_info.ndpi_flow);
+            }
+        }
+        debug!("Freed cached nDPI flow structures.");
+
+        // Exit the nDPI detection module.
+        if !self.detection_module.is_null() {
+            unsafe {
+                sys::ndpi_exit_detection_module(self.detection_module);
+            }
+            self.detection_module = ptr::null_mut(); // Mark as cleaned up
+            debug!("Exited nDPI detection module.");
+        }
+
+        // Free the protocol structures pointer (if it was ever assigned)
+        // ndpi_free_protocols was unresolved, assuming exit module handles cleanup.
+        if !self.ndpi_struct_protocols.is_null() {
+             // unsafe { ndpi_bindings::ndpi_free_protocols(self.ndpi_struct_protocols); }
+             self.ndpi_struct_protocols = ptr::null_mut();
+             debug!("Cleared nDPI protocol structures pointer.");
+        }
+
+        info!("nDPI engine cleanup finished.");
     }
 }
 
-/// List all protocols supported by nDPI
-pub fn list_supported_protocols() -> Vec<String> {
-    match NdpiEngine::get_instance() {
-        Ok(detector) => detector.list_all_protocols(),
-        Err(_) => vec!["nDPI not available".to_string()],
+/// Implement the `Drop` trait to ensure cleanup happens automatically when `NdpiEngine` goes out of scope.
+impl Drop for NdpiEngine {
+    fn drop(&mut self) {
+        self.cleanup();
     }
-} 
+}
