@@ -1,0 +1,16 @@
+# Improvements
+- Potential Leak: If ndpi_init_detection_module fails after the initial libc::calloc in new(), the allocated detection_module memory might be leaked. An Err is returned, but libc::free isn't called on detection_module in that specific error path.
+- Flow Creation Error: If allocating memory for a new ndpi_flow_struct fails inside analyze_packet, an error is returned, but the flow processing stops. This seems reasonable, although logging the error is important (which it does).
+- Missing Protocols Map: The self.protocols map is initialized as empty and never populated. The get_protocol_name function has logic to fall back to calling ndpi_get_proto_name directly, making the map unused. This could be simplified or the map could be populated during initialization (e.g., by iterating through ndpi_get_num_supported_protocols).
+- Risk Conversion (convert_risk_enum): The conversion from ndpi_risk_enum (u32) to score/name seems okay, but the call to ndpi_risk2score converts the u32 risk enum back to u64 (risk_enum.into()). This might be unnecessary if ndpi_risk2score can actually take a u32. Check the signature in ndpi_bindings.rs. Also, the severity variable is calculated but unused.
+- Encryption Field: NDPIProtocolInfo.is_encrypted is hardcoded to false. The comment indicates ndpi_is_protocol_encrypted was unresolved. This functionality is missing. Needs investigation in the bindings or nDPI docs.
+- Resource Consumption: The flow_cache could potentially grow large if scanning many hosts/ports or dealing with long-lived flows, consuming memory. Implementing flow timeouts/eviction based on last_seen_timestamp_ms would prevent unbounded growth. This is a significant missing feature for long-running scans.
+-----------
+# High-Priority Improvements/Bug Fixes:
+- Implement Flow Timeout/Eviction: Add logic to periodically scan flow_cache and remove old flows (based on last_seen_timestamp_ms) to prevent unbounded memory growth. Remember to free the associated ndpi_flow_struct using ndpi_flow_free when evicting.
+- Fix Potential Memory Leak in new(): Ensure libc::free(detection_module) is called if ndpi_init_detection_module fails after the initial allocation.
+- Investigate/Implement is_encrypted: Determine how to correctly check if a protocol is encrypted using nDPI and populate the NDPIProtocolInfo.is_encrypted field. Check ndpi_bindings.rs for relevant functions.
+- Review ndpi_init_prefs: Explore nDPI options to potentially disable features not strictly required by the scanner, reducing the library's attack surface.
+- Refine Risk Conversion: Double-check the signature of ndpi_risk2score and avoid the potentially unnecessary u32 -> u64 conversion if possible. Remove or use the severity variable.
+# Fixes
+- doesnt end program
