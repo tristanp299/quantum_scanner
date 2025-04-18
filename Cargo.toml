@@ -85,7 +85,7 @@ serde_json = "1.0"
 humantime-serde = "1.1"
 
 # Concurrency
-futures = "0.3.28"
+futures = "0.3"
 async-trait = "0.1.68"
 
 # Networking extras - replaced trust-dns with hickory-dns

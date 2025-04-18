@@ -168,7 +168,19 @@ pub fn format_text_results(results: &ScanResults, verbose: bool) -> String {
             
             // nDPI protocol detection if available
             if let Some(protocol) = &port_result.ndpi_protocol {
-                output.push_str(&format!("Protocol (nDPI): {:?}\n", protocol));
+                let confidence_str = format!("{:?}", protocol.confidence);
+                output.push_str(&format!("Protocol (nDPI): {} (Confidence: {})\n", 
+                    protocol.protocol_name, style(confidence_str).cyan()));
+                if let Some(risk) = &protocol.risk {
+                    output.push_str(&format!("    Risk: {} (Score: {})\n", 
+                        style(&risk.name).red(), risk.score));
+                }
+                if protocol.is_encrypted {
+                    output.push_str(&format!("    {}\n", style("Encrypted").green()));
+                }
+                if let Some(hostname) = &protocol.hostname {
+                    output.push_str(&format!("    Hostname: {}\n", style(hostname).dim()));
+                }
             }
             
             // States by scan type
@@ -693,9 +705,18 @@ pub fn print_port_details(results: &ScanResults, port: u16, verbose: bool) -> Re
         
         // nDPI protocol detection if available
         if let Some(protocol) = &port_result.ndpi_protocol {
-            println!("Protocol (nDPI): {:?}", protocol);
-            if let Some(confidence) = &port_result.ndpi_confidence {
-                println!("Confidence: {}", confidence);
+            let confidence_str = format!("{:?}", protocol.confidence);
+            println!("Protocol (nDPI): {} (Confidence: {})", 
+                protocol.protocol_name, style(confidence_str).cyan());
+            if let Some(risk) = &protocol.risk {
+                println!("    Risk: {} (Score: {})", 
+                    style(&risk.name).red(), risk.score);
+            }
+            if protocol.is_encrypted {
+                println!("    {}", style("Encrypted").green());
+            }
+            if let Some(hostname) = &protocol.hostname {
+                println!("    Hostname: {}", style(hostname).dim());
             }
         }
         

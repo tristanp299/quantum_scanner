@@ -30,6 +30,7 @@ use tokio::sync::Semaphore;
 // Removed unused: use tokio::sync::mpsc;
 use tokio::time::Instant; // Added Instant
 use tokio::sync::mpsc; // Re-added mpsc as it's used in perform_ndpi_analysis
+use futures::stream::{FuturesUnordered, StreamExt}; // Added for managing nDPI tasks
 
 // Conditional pcap import
 #[cfg(feature = "ndpi")]
@@ -61,7 +62,7 @@ use crate::http_analyzer;
 use crate::service_fingerprints::ServiceFingerprints;
 use crate::ml_service_ident;
 use crate::ml_service_ident::ServiceIdentification;
-use crate::ndpi_integration; // Add module import
+use crate::ndpi_integration::{NdpiEngine, FlowKey}; // Consolidate imports here
 use crate::utils::{find_local_ipv4}; // Add this import at the top
 // Removed duplicate Capture import - Device and Capture are already imported earlier
 // use pcap::{Capture}; // Remove Error alias
@@ -75,6 +76,8 @@ use std::num::NonZeroU32;
 // Removed unused: use tokio::task;
 
 use crate::banner::grab_banner_raw; // Use suggested name (was grab_banner_http)
+
+use crate::models::{NdpiConfidence}; // Removed unused NDPIProtocolInfo
 
 /// Main scanner implementation
 /// Orchestrates port scanning using various techniques and performs post-scan analysis.
@@ -146,13 +149,13 @@ pub struct QuantumScanner {
     /// DNS Tunneling: Custom lookup domain
     dns_tunnel_domain: Option<String>,
     /// Metrics for scan performance and statistics collection
-    metrics: Option<Arc<Mutex<ScanMetrics>>>,
+    metrics: Arc<Mutex<ScanMetrics>>, // Changed: Now Arc<Mutex<ScanMetrics>>, always initialized
     /// Results map to store scan results by port
     results_map: HashMap<u16, PortResult>,
     /// Flag to enable/disable nDPI analysis (default: true)
     service_scan_mode: bool,
     /// Optional nDPI engine instance (initialized if enable_ndpi is true)
-    ndpi_engine: Option<Arc<Mutex<ndpi_integration::NdpiEngine>>>,
+    ndpi_engine: Option<Arc<Mutex<NdpiEngine>>>,
 }
 
 impl QuantumScanner {
@@ -370,7 +373,7 @@ impl QuantumScanner {
             ml_identifier: ml_service_identifier, // Store the initialized identifier instance
             dns_tunnel_server: None,
             dns_tunnel_domain: None,
-            metrics: None,
+            metrics: Arc::new(Mutex::new(ScanMetrics::new())), // Initialize metrics struct
             results_map: HashMap::new(),
             service_scan_mode, // Store service_scan_mode flag
             ndpi_engine: None, // Initialize ndpi_engine as None
@@ -393,7 +396,7 @@ impl QuantumScanner {
         // Initialize nDPI engine if service scan mode is enabled
         if self.service_scan_mode {
             info!("Initializing nDPI engine for service detection...");
-            match ndpi_integration::NdpiEngine::new() {
+            match NdpiEngine::new() {
                 Ok(engine) => {
                     info!("nDPI engine initialized successfully.");
                     self.ndpi_engine = Some(Arc::new(Mutex::new(engine)));
@@ -417,48 +420,17 @@ impl QuantumScanner {
         // --- End nDPI Initialization ---
 
         // Shared state for collecting results across asynchronous tasks.
-        // - `results_map`: Stores detailed `PortResult` for each scanned port.
-        // - `open_ports_set`: Quickly tracks ports found Open or OpenFiltered by any scan type.
-        // - `packets_sent`: Basic counter for attempted scan tasks (see limitations).
-        // - `successful_scans`: Basic counter for tasks that completed without error (see limitations).
-        // - `semaphore`: Limits the number of concurrent scan tasks.
         let results_map = Arc::new(Mutex::new(HashMap::<u16, PortResult>::new()));
         let open_ports_set = Arc::new(Mutex::new(HashSet::<u16>::new()));
-        let packets_sent = Arc::new(Mutex::new(0u64)); // Uses tokio::sync::Mutex now
-        let successful_scans = Arc::new(Mutex::new(0u64)); // Uses tokio::sync::Mutex now
+        // Remove local counters, use self.metrics instead
+        // let packets_sent = Arc::new(Mutex::new(0u64)); 
+        // let successful_scans = Arc::new(Mutex::new(0u64));
         let semaphore = Arc::new(Semaphore::new(self.concurrency));
-        // Initial tasks vector declaration
         
-        // Create shared state for self fields that will be accessed from async tasks
-        let target_ip = self.target_ip;
-        let _use_ipv6 = self.use_ipv6;
-        let _evasion = self.evasion;
-        let _enhanced_evasion = self.enhanced_evasion;
-        let _timeout_scan = self.timeout_scan;
-        let _timeout_banner = self.timeout_banner; // Add underscore to silence warning
-        let local_ip_v4 = self.local_ip_v4.clone();
-        let _mimic_protocol = self.mimic_protocol.clone();
-        let _mimic_os = self.mimic_os.clone();
-        let _ttl_jitter = self.ttl_jitter;
-        let _protocol_variant = self.protocol_variant.clone();
-        let _ml_identification = self.ml_identification;
-        let memory_log = self.memory_log.clone();
-        let _verbose = self.verbose; // Prefix with underscore to avoid unused variable warning
-        let debug_mode = self.debug; // Clone the debug flag to use in async closures
-        let _scan_types = self.scan_types.clone(); // Adding underscore as we use self.scan_types directly
-        
-        // Clone the rate limiter Arc for use in the loop
-        let _rate_limiter_clone = self.rate_limiter.clone(); // Adding underscore as we use self.rate_limiter directly
-
-        // Check if raw sockets are needed and log a reminder about privileges.
-        // The actual privilege check happens in main.rs, this is just a reminder.
-        let needs_raw_sockets = requires_raw_sockets(&self.scan_types); // Using the function from models
-        if needs_raw_sockets {
-            debug!("Scan requires raw sockets. Ensure scanner is run with sufficient privileges (root/Administrator).");
-        }
+        // Clone Arc<Mutex<ScanMetrics>> for tasks
+        let metrics_clone = self.metrics.clone(); 
 
         // --- Core scanning phase (port discovery) ---
-        // A vector to store all spawned task handles for joining later
         let mut tasks = Vec::new();
         
         // Scan each port with each scan type
@@ -473,8 +445,7 @@ impl QuantumScanner {
                 semaphore.clone(),
                 results_map.clone(),
                 open_ports_set.clone(),
-                packets_sent.clone(),
-                successful_scans.clone(),
+                metrics_clone.clone(), // Pass metrics Arc
                 target_ip,
                 local_ip_v4,
                 &self.ports,
@@ -540,26 +511,84 @@ impl QuantumScanner {
                 }));
             }
 
-             // Wait for nDPI analysis tasks to complete
+             // Wait for nDPI analysis tasks to complete, allowing early exit
+             let ndpi_analysis_start = Instant::now();
+             let ndpi_timeout_duration = Duration::from_secs(60 * 2); // 2 minute timeout
+             let mut active_ndpi_tasks = FuturesUnordered::from_iter(ndpi_tasks);
+             let total_ndpi_tasks = active_ndpi_tasks.len();
+             let mut completed_ndpi_tasks = 0;
+
+             info!("[nDPI] Waiting for {} analysis sub-tasks to complete (max {}s)...", total_ndpi_tasks, ndpi_timeout_duration.as_secs());
+
+             loop {
+                 tokio::select! {
+                     // Biased select ensures we prefer checking the timeout if both are ready
+                     biased;
+
+                     // Check the overall timeout
+                     _ = tokio::time::sleep_until(ndpi_analysis_start + ndpi_timeout_duration) => {
+                         warn!("[nDPI] Analysis phase timed out after {:.1} seconds. {}/{} tasks completed.",
+                               ndpi_analysis_start.elapsed().as_secs_f32(),
+                               completed_ndpi_tasks,
+                               total_ndpi_tasks);
+                         // Optionally abort remaining tasks:
+                         // active_ndpi_tasks.iter().for_each(|task| task.abort());
+                         break; // Exit due to timeout
+                     }
+
+                     // Poll the next completed task
+                     Some(result) = active_ndpi_tasks.next() => {
+                         completed_ndpi_tasks += 1;
+                         match result {
+                             Ok(_) => {
+                                 // Task completed successfully (or returned Ok even if internal error happened, handled within task)
+                                 trace!("[nDPI] Sub-task completed ({}/{})", completed_ndpi_tasks, total_ndpi_tasks);
+                             }
+                             Err(e) => {
+                                 // Task panicked or was cancelled
+                                 warn!("[nDPI] Analysis sub-task failed: {:?}", e);
+                             }
+                         }
+
+                         // If FuturesUnordered becomes empty, all tasks are done
+                         if active_ndpi_tasks.is_empty() {
+                             info!("[nDPI] All {} analysis sub-tasks completed in {:.1} seconds.",
+                                   total_ndpi_tasks,
+                                   ndpi_analysis_start.elapsed().as_secs_f32());
+                             break; // Exit the loop early
+                         }
+                     }
+
+                     // Ensure loop termination if task set becomes empty immediately or no tasks were spawned
+                     else => {
+                         if active_ndpi_tasks.is_empty() {
+                              if total_ndpi_tasks == 0 {
+                                  info!("[nDPI] No analysis sub-tasks to run.");
+                              } else {
+                                  info!("[nDPI] All analysis sub-tasks completed (checked after select).");
+                              }
+                              break;
+                         }
+                         // This branch being hit likely means the stream ended unexpectedly or there's an issue.
+                         // Adding a small sleep helps prevent potential tight loops in unexpected scenarios,
+                         // though select! with `else` should ideally handle this.
+                         tokio::time::sleep(Duration::from_millis(5)).await;
+                         warn!("[nDPI] Select loop 'else' branch reached unexpectedly. Active tasks: {}", active_ndpi_tasks.len());
+                     }
+                 }
+             }
+             // Original code replaced by the loop above
+             /*
              match tokio::time::timeout(
                  Duration::from_secs(60 * 3), // 3 minute timeout for nDPI analysis
                  join_all(ndpi_tasks)
              ).await {
-                 Ok(_) => info!("[nDPI] Analysis phase complete."),
-                 Err(_) => warn!("[nDPI] Analysis phase timed out after 3 minutes."),
+                 Ok(_) => info!(\"[nDPI] Analysis phase complete.\"),
+                 Err(_) => warn!(\"[nDPI] Analysis phase timed out after 3 minutes.\"),
              }
+             */
         }
         // --- End nDPI Analysis Phase ---
-
-        // Initialize metrics if not already initialized
-        if self.metrics.is_none() {
-            self.metrics = Some(Arc::new(Mutex::new(ScanMetrics::new())));
-        }
-        
-        // Create service identification components
-        // ML identifier is now initialized in `new` and cloned above
-        let http_analyzer_instance = Arc::new(http_analyzer::HttpAnalyzer::new());
-        let fingerprint_db = Arc::new(ServiceFingerprints::new());
 
         // --- Post-scan Analysis (Banner Grabbing, Service ID) ---
         // Clone needed values for the analysis tasks
@@ -785,9 +814,9 @@ impl QuantumScanner {
 
         let end_time = Utc::now();
         let final_results_map = results_map.lock().await.clone();
-        let mut final_open_ports = open_ports_set.lock().await.clone();
+        let final_open_ports = open_ports_set.lock().await.clone();
         
-        // Final pass: ensure all ports with Open or OpenFiltered status from any scan type are in open_ports
+        // Final pass: ensure all ports with Open or OpenFiltered status are in open_ports
         for (&port, result) in &final_results_map {
             let is_open = result.tcp_states.values().any(|&status| 
                 status == PortStatus::Open || status == PortStatus::OpenFiltered);
@@ -826,13 +855,29 @@ impl QuantumScanner {
             }
         }
         
-        let final_packets_sent = *packets_sent.lock().await;
-        let final_successful_scans = *successful_scans.lock().await;
+        // --- Update Final Metrics --- 
+        {
+            let mut metrics_guard = self.metrics.lock().await;
+            metrics_guard.scan_time_ms = (end_time - start_time).num_milliseconds() as u64;
+            metrics_guard.open_ports_found = final_open_ports.len() as u32;
+            // Estimate closed/filtered based on total ports scanned and open count
+            let total_ports_scanned = self.ports.len() as u32;
+            // Note: This is an approximation. A port might be closed by one scan type and filtered by another.
+            // We prioritize Open/OpenFiltered count.
+            metrics_guard.filtered_ports_found = final_results_map.values()
+                .filter(|r| r.final_status == PortStatus::Filtered).count() as u32;
+            metrics_guard.closed_ports_found = final_results_map.values()
+                .filter(|r| r.final_status == PortStatus::Closed).count() as u32;
+            // TODO: Add discovery_time_ms and service_id_time_ms if timers are implemented for phases
+        }
+        // --- End Update Final Metrics ---
 
-        info!("Scan finished in {} seconds. Found {} open/open|filtered ports.", (end_time - start_time).num_seconds(), final_open_ports.len());
-        
+        // Log final metrics if debug enabled
         if debug_mode {
-            debug!("Tasks attempted (packets_sent counter): {}, Tasks completed without error (successful_scans counter): {}", final_packets_sent, final_successful_scans);
+            let metrics_guard = self.metrics.lock().await;
+            debug!("Final Metrics: {:?}", metrics_guard);
+            // Local counters are removed, metrics are now central
+            // debug!("Tasks attempted (packets_sent counter): {}, Tasks completed without error (successful_scans counter): {}", final_packets_sent, final_successful_scans);
         }
 
         // --- nDPI Cleanup ---
@@ -852,8 +897,9 @@ impl QuantumScanner {
             start_time,
             end_time,
             scan_types: self.scan_types.clone(),
-            packets_sent: final_packets_sent as usize, 
-            successful_scans: final_successful_scans as usize,
+            // Read final counts directly from metrics
+            packets_sent: self.metrics.lock().await.packets_sent as usize, 
+            successful_scans: self.metrics.lock().await.successful_scans as usize,
             os_summary: None,
             risk_assessment: None,
             service_categories: None,
@@ -898,8 +944,7 @@ impl QuantumScanner {
         semaphore: Arc<Semaphore>,
         results_map: Arc<Mutex<HashMap<u16, PortResult>>>,
         open_ports_set: Arc<Mutex<HashSet<u16>>>,
-        packets_sent: Arc<Mutex<u64>>,
-        successful_scans: Arc<Mutex<u64>>,
+        metrics: Arc<Mutex<ScanMetrics>>, // Changed: Takes metrics Arc
         target_ip: IpAddr,
         local_ip_v4: Option<Ipv4Addr>,
         ports: &[u16],
@@ -933,8 +978,7 @@ impl QuantumScanner {
             let semaphore_clone = semaphore.clone();
             let results_map_clone = results_map.clone();
             let open_ports_set_clone = open_ports_set.clone();
-            let packets_sent_clone = packets_sent.clone();
-            let successful_scans_clone = successful_scans.clone();
+            let metrics_clone = metrics.clone(); // Clone metrics Arc for the task
             let local_ip = local_ip_v4.map(IpAddr::V4);
             let target_ip_clone = target_ip;
             let timeout_scan_clone = timeout_scan;
@@ -984,10 +1028,10 @@ impl QuantumScanner {
                     }
                 }
                 
-                // Increment packets sent counter
+                // Increment packets sent counter in metrics
                 {
-                    let mut counter = packets_sent_clone.lock().await;
-                    *counter += 1;
+                    let mut metrics_guard = metrics_clone.lock().await;
+                    metrics_guard.packets_sent += 1;
                 }
                 
                 // Perform the specific scan type
@@ -1322,10 +1366,10 @@ impl QuantumScanner {
                 
                 // Process the scan result
                 if let Ok(scan_result) = &result {
-                    // Increment successful scans counter
+                    // Increment successful scans counter in metrics
                     {
-                        let mut counter = successful_scans_clone.lock().await;
-                        *counter += 1;
+                        let mut metrics_guard = metrics_clone.lock().await;
+                        metrics_guard.successful_scans += 1;
                     }
                     
                     // Log result if memory logger is available and debug is enabled
@@ -1451,8 +1495,8 @@ impl QuantumScanner {
         target_ip: IpAddr,
         port: u16,
         timeout_duration: Duration,
-        ndpi_engine: Arc<Mutex<ndpi_integration::NdpiEngine>>,
-        _results_map: Arc<Mutex<HashMap<u16, PortResult>>>, // Prefix with _ as unused
+        ndpi_engine: Arc<Mutex<NdpiEngine>>,
+        results_map: Arc<Mutex<HashMap<u16, PortResult>>>,
     ) {
         info!("[nDPI Port {}] Starting analysis for target: {}", port, target_ip);
 
@@ -1553,77 +1597,140 @@ impl QuantumScanner {
         let processing_start = Instant::now();
          info!("[nDPI Port {}] Waiting for packets from capture thread...", port);
 
-        // Collect packets until timeout or channel closes
+        // --- Modified Packet Collection Loop ---
+        // Use a mutable reference to the capture_handle to poll it inside select!
+        let mut capture_handle = capture_handle; 
         loop {
-             // Use tokio::select! for timeout handling
+             // Use tokio::select! for timeout handling and capture thread completion
             tokio::select! {
-                 // Biased select ensures we check timeout first if both are ready
-                 _ = tokio::time::sleep_until(tokio::time::Instant::now() + timeout_duration) => {
+                 // Biased select ensures we check timeout/completion first
+                 biased;
+
+                 // Branch 1: Overall Timeout Check
+                 _ = tokio::time::sleep_until(processing_start + timeout_duration) => {
                      info!("[nDPI Port {}] Packet processing timeout reached after {:.2}s.", port, processing_start.elapsed().as_secs_f32());
-                     break;
+                     // Abort the capture task explicitly if it's still running on timeout
+                     capture_handle.abort(); 
+                     break; // Exit due to timeout
                  }
+
+                 // Branch 2: Check if the Capture Thread Finished
+                 // Poll the JoinHandle directly. This resolves when the task completes.
+                 // We use &mut capture_handle so it can be polled repeatedly.
+                 capture_result = &mut capture_handle => {
+                     info!("[nDPI Port {}] Capture thread completed. Processing remaining packets.", port);
+                     // Log the result (Ok or Err) from the capture task for debugging
+                     match capture_result {
+                         Ok(Ok(count)) => trace!("[nDPI Port {}] Capture thread finished successfully ({} packets).", port, count),
+                         Ok(Err(e)) => warn!("[nDPI Port {}] Capture thread finished with pcap error: {}", port, e),
+                         Err(join_err) => warn!("[nDPI Port {}] Capture thread failed to join: {}", port, join_err),
+                     }
+                     // Capture finished, break the loop (packet_rx channel should be closed by the task)
+                     break; 
+                 }
+
+                 // Branch 3: Receive Packet from Channel
                  packet_result = packet_rx.recv() => {
                     match packet_result {
                         Some((data, timestamp)) => {
                             debug!("[nDPI Port {}] Received packet ({} bytes) from capture thread.", port, data.len());
                             received_packets.push((data, timestamp as u64)); // Store packet and timestamp (use u64)
+                            // Optional: Check processing_start.elapsed() here too if fine-grained timeout needed
                         }
                         None => {
-                            info!("[nDPI Port {}] Packet channel closed by capture thread.", port);
-                            break; // Capture thread finished or errored out
+                            info!("[nDPI Port {}] Packet channel closed by capture thread (end of stream).", port);
+                            break; // Capture thread finished and closed channel
                         }
                     }
                 }
             }
-            // Check elapsed time manually as well, just in case
+            // Manual elapsed time check is less critical now with capture_handle polling, but can remain as safety
              if processing_start.elapsed() >= timeout_duration {
-                 // info!("[nDPI Port {}] Processing loop time exceeded timeout.", port);
                  break;
              }
         }
+        // --- End Modified Packet Collection Loop ---
 
          info!("[nDPI Port {}] Finished collecting packets. {} packets received for processing.", port, received_packets.len());
 
          // Ensure probe task completes (optional, mostly for cleanup)
         let _ = probe_task.await; 
 
-        // Wait for the capture thread to finish and get result
-         if let Ok(capture_result) = capture_handle.await {
-             match capture_result {
-                 Ok(count) => info!("[nDPI Port {}] Capture thread completed successfully ({} packets).", port, count),
-                 Err(e) => error!("[nDPI Port {}] Capture thread returned error: {}", port, e),
-             }
+        // Capture handle is already awaited/polled within the loop. 
+        // We don't need to await it again here.
 
-             // Process collected packets if any were received
-            if !received_packets.is_empty() {
-                let mut engine_guard = ndpi_engine.lock().await;
-                let mut final_flow_key: Option<ndpi_integration::FlowKey> = None;
+         // Process collected packets if any were received
+        if !received_packets.is_empty() {
+            let mut engine_guard = ndpi_engine.lock().await;
+            let mut final_flow_key: Option<FlowKey> = None;
 
-                info!("[nDPI Port {}] Processing {} captured packets with nDPI engine...", port, received_packets.len());
-                for (packet_data, timestamp) in received_packets {
-                    match engine_guard.analyze_packet(&packet_data, timestamp) {
-                        Ok(flow_key) => {
-                            trace!("[nDPI Port {}] Successfully processed packet for flow: {:?}", port, flow_key);
-                            if final_flow_key.is_none() {
-                                final_flow_key = Some(flow_key);
+            info!("[nDPI Port {}] Processing {} captured packets with nDPI engine...", port, received_packets.len());
+            for (packet_data, timestamp) in received_packets {
+                match engine_guard.analyze_packet(&packet_data, timestamp) {
+                    Ok(flow_key) => {
+                        trace!("nDPI processed packet for flow: {:?}", flow_key);
+
+                        // --- START: Added code to update results map ---
+                        // Attempt to get the updated protocol info from the engine's cache
+                        if let Some(ndpi_info) = engine_guard.get_flow_protocol(&flow_key) {
+                            trace!("Got nDPI info for flow {:?}: {:?}", flow_key, ndpi_info);
+
+                            // Lock the shared results map to update it
+                            let mut results = results_map.lock().await;
+
+                            // Determine which port in the flow key corresponds to the target port
+                            // This assumes the *destination* port is the one we initially scanned.
+                            // For connections *initiated by* the target, the source port might be relevant,
+                            // but for basic service detection, checking the destination is usually correct.
+                            let target_port = flow_key.dst_port; // Could also check flow_key.src_port if needed
+
+                            // Find the PortResult for the target port and update it
+                            if let Some(port_result) = results.get_mut(&target_port) {
+                                trace!("Updating PortResult for port {} with nDPI info", target_port);
+
+                                // Store the detailed NDPIProtocolInfo
+                                port_result.ndpi_protocol = Some(ndpi_info.clone());
+
+                                // Update the separate confidence string field (as it exists in models.rs)
+                                port_result.ndpi_confidence = Some(format!("{:?}", ndpi_info.confidence));
+
+                                // Optionally: Update the main service name if confidence is high or it's not set yet
+                                if port_result.service.is_none() || matches!(ndpi_info.confidence, NdpiConfidence::Certain) {
+                                     if !ndpi_info.protocol_name.is_empty() && ndpi_info.protocol_name != "Unknown" {
+                                        port_result.service = Some(ndpi_info.protocol_name.clone());
+                                        debug!("nDPI identified service for port {}: {}", target_port, ndpi_info.protocol_name);
+                                     }
+                                }
+
+                            } else {
+                                // This might happen if the flow involves ports not in the initial scan list,
+                                // or if the source port was the target port. Log a warning.
+                                warn!("Could not find PortResult for port {} in results map to update nDPI info.", target_port);
                             }
+                            // Explicitly drop the lock on the results map
+                            drop(results);
                         }
-                        Err(e) => {
-                            warn!("[nDPI Port {}] Error analyzing packet with nDPI: {}", port, e);
+                        // --- END: Added code to update results map ---
+
+                        trace!("nDPI processed packet for flow: {:?}", flow_key);
+
+                        if final_flow_key.is_none() {
+                            final_flow_key = Some(flow_key);
                         }
                     }
+                    Err(e) => {
+                        warn!("nDPI packet analysis failed: {}", e);
+                    }
                 }
-
-                debug!("[nDPI Port {}] Finished processing packets. Retrieving final results...", port);
-
-                // Drop the lock before the block ends
-                drop(engine_guard);
-            } else {
-                // Adjusted log message for clarity
-                debug!("[nDPI Port {}] No packets received, skipping nDPI processing.", port);
             }
+
+            debug!("[nDPI Port {}] Finished processing packets. Retrieving final results...", port);
+
+            // Drop the lock before the block ends
+            drop(engine_guard);
         } else {
-            error!("[nDPI Port {}] Capture task panicked or failed.", port);
+            // Adjusted log message for clarity
+            debug!("[nDPI Port {}] No packets received, skipping nDPI processing.", port);
         }
     }
 
@@ -1677,5 +1784,11 @@ impl QuantumScanner {
         self.results_map = HashMap::new();
         
         Ok(())
+    }
+
+    /// Helper function to get a clone of the metrics Arc
+    /// This allows main.rs to access the final metrics after the scan.
+    pub fn get_metrics(&self) -> Arc<Mutex<ScanMetrics>> {
+        self.metrics.clone()
     }
 }

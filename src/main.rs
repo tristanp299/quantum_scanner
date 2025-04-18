@@ -1355,6 +1355,23 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // --- Cleanup --- 
     info!("Starting cleanup phase...");
+
+    // --- Display Metrics ---
+    // Get metrics from the scanner and display them
+    let final_metrics = scanner.get_metrics(); // Use the new helper method
+    let metrics_guard = final_metrics.lock().await; // Lock for reading
+    info!("--- Scan Metrics ---");
+    info!("  Total scan time: {:.2} seconds", metrics_guard.scan_time_ms as f64 / 1000.0);
+    info!("  Packets sent: {}", metrics_guard.packets_sent);
+    info!("  Successful operations: {}", metrics_guard.successful_scans);
+    info!("  Open ports: {}", metrics_guard.open_ports_found);
+    info!("  Closed ports: {}", metrics_guard.closed_ports_found);
+    info!("  Filtered ports: {}", metrics_guard.filtered_ports_found);
+    // Add other metrics as needed (e.g., discovery_time_ms)
+    info!("--------------------");
+    // Drop the lock explicitly (optional, happens when guard goes out of scope)
+    drop(metrics_guard); 
+
     // Unmount RAM disk if created
     if let Err(e) = cleanup_ramdisk(&ramdisk_path) {
         warn!("Error during RAM disk cleanup: {}", e);

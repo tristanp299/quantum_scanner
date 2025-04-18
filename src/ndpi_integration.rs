@@ -23,6 +23,17 @@ use crate::models::{NDPIProtocolInfo, NdpiRisk, NdpiConfidence}; // Import struc
 use crate::ndpi_sys as sys; // Use re-exported items from ndpi_sys where possible
 use crate::ndpi_bindings; // Use direct bindings when needed
 use crate::ndpi_bindings::ndpi_init_prefs; // Import ndpi_init_prefs directly
+use std::time::{Duration, Instant};
+
+// Added constants for known encrypted protocol IDs and flow timeout
+const NDPI_PROTOCOL_TLS_ID: sys::ndpi_protocol_id_t = 91;
+const NDPI_PROTOCOL_DTLS_ID: sys::ndpi_protocol_id_t = 30;
+const NDPI_PROTOCOL_QUIC_ID: sys::ndpi_protocol_id_t = 188;
+
+/// Timeout for flows in milliseconds (e.g., 5 minutes)
+const FLOW_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+/// Interval for checking flow timeouts (e.g., check every 1000 packets)
+const FLOW_CLEANUP_PACKET_INTERVAL: u64 = 1000;
 
 /// Represents the 5-tuple key for identifying a network flow.
 /// Used as the key in the nDPI flow cache.
@@ -49,6 +60,8 @@ struct FlowInfo {
     detected_protocol: Option<NDPIProtocolInfo>,
     /// Timestamp when the last packet for this flow was seen (milliseconds).
     last_seen_timestamp_ms: u64,
+    /// Added last_seen_instant for more precise timeout calculation using std::time
+    last_seen_instant: Instant,
 }
 
 /// Wrapper for nDPI detection functionality with full protocol support
@@ -64,6 +77,8 @@ pub struct NdpiEngine {
     flow_cache: HashMap<FlowKey, FlowInfo>,
     /// Internal nDPI structure pointer, likely related to protocol definitions.
     ndpi_struct_protocols: *mut ndpi_bindings::ndpi_protocol, // Use type from bindings
+    /// Added packet counter for periodic cleanup check
+    packet_counter: u64,
 }
 
 
@@ -107,13 +122,13 @@ impl NdpiEngine {
     pub fn new() -> Result<Self> {
         info!("Initializing nDPI engine...");
         // Allocate memory for the detection module structure.
-        let detection_module = unsafe {
+        let allocated_module = unsafe {
             libc::calloc(1, mem::size_of::<sys::ndpi_detection_module_struct>())
                 as *mut sys::ndpi_detection_module_struct
         };
 
         // Check if memory allocation failed.
-        if detection_module.is_null() {
+        if allocated_module.is_null() {
             return Err(anyhow!("Failed to allocate memory for nDPI detection module"));
         }
 
@@ -126,6 +141,7 @@ impl NdpiEngine {
 
         // Check if initialization failed (returned null pointer)
         if ndpi_struct.is_null() {
+            unsafe { libc::free(allocated_module as *mut libc::c_void); }
             return Err(anyhow!("Failed to initialize nDPI detection module"));
         }
 
@@ -159,9 +175,10 @@ impl NdpiEngine {
 
         // Finalize initialization after setting any custom parameters
         // This step is crucial for nDPI to build its internal structures.
-        let detection_module = ndpi_struct; // ndpi_init_detection_module returns the pointer
+        let detection_module = ndpi_struct;
         if detection_module.is_null() {
-             return Err(anyhow!("Failed to initialize nDPI detection module (returned null)"));
+             unsafe { libc::free(allocated_module as *mut libc::c_void); }
+             return Err(anyhow!("Failed to initialize nDPI detection module (returned null unexpectedly)"));
         }
 
         // Populate internal protocol map (optional, can be done on demand)
@@ -174,6 +191,7 @@ impl NdpiEngine {
             version_info,
             flow_cache: HashMap::new(),
             ndpi_struct_protocols, // Store null pointer for now
+            packet_counter: 0, // Initialize packet counter
         })
     }
 
@@ -204,6 +222,7 @@ impl NdpiEngine {
 
     /// Analyzes a raw network packet, identifies its flow, updates the flow state
     /// in the cache, and runs nDPI detection on it.
+    /// Also handles periodic cleanup of timed-out flows.
     ///
     /// # Arguments
     /// * `packet_data` - Slice containing the raw packet data (starting from IP header).
@@ -218,6 +237,12 @@ impl NdpiEngine {
             packet_data.len(),
             timestamp_ms
         );
+
+        // Increment packet counter and check for cleanup interval
+        self.packet_counter += 1;
+        if self.packet_counter % FLOW_CLEANUP_PACKET_INTERVAL == 0 {
+            self.cleanup_old_flows();
+        }
 
         // Parse the packet using etherparse.
         let packet = SlicedPacket::from_ip(packet_data)
@@ -262,6 +287,7 @@ impl NdpiEngine {
 
         // --- Borrow Checker Fix Start ---
         // 1. Check if flow exists. If not, create and insert it.
+        let now_instant = Instant::now();
         let ndpi_flow_ptr = if !self.flow_cache.contains_key(&flow_key) {
             debug!("Creating new flow entry for: {:?}", flow_key);
             let ptr = unsafe {
@@ -279,6 +305,7 @@ impl NdpiEngine {
                     ndpi_flow: ptr,
                     detected_protocol: None,
                     last_seen_timestamp_ms: timestamp_ms,
+                    last_seen_instant: now_instant, // Store current instant
                 });
                 ptr // Return the newly created pointer
             }
@@ -292,9 +319,10 @@ impl NdpiEngine {
             return Err(anyhow!("Internal error: Flow pointer is null for flow key: {:?}", flow_key));
         }
 
-        // Update last seen time (needs mutable borrow, but short-lived)
+        // Update last seen time and instant (needs mutable borrow, but short-lived)
         if let Some(info) = self.flow_cache.get_mut(&flow_key) {
              info.last_seen_timestamp_ms = timestamp_ms;
+             info.last_seen_instant = now_instant; // Update instant
         } else {
              // This should not happen if the logic above is correct
              return Err(anyhow!("Internal error: Flow key {:?} disappeared from cache unexpectedly.", flow_key));
@@ -373,6 +401,10 @@ impl NdpiEngine {
             };
             // --- End Borrow Checker Fix ---
 
+            // Check if the underlying protocol is inherently encrypted
+            let is_encrypted = matches!(detected_protocol.master_protocol as u32,
+                NDPI_PROTOCOL_TLS_ID | NDPI_PROTOCOL_DTLS_ID | NDPI_PROTOCOL_QUIC_ID);
+
             // Create the NdpiProtocolInfo struct using data from models.rs definition
             let ndpi_info = NDPIProtocolInfo {
                 master_protocol_id: detected_protocol.master_protocol,
@@ -380,7 +412,7 @@ impl NdpiEngine {
                 protocol_name,
                 category_name,
                 confidence: NdpiConfidence::from(flow_confidence), // Convert u32 confidence
-                is_encrypted: false, // Placeholder - ndpi_is_protocol_encrypted was unresolved
+                is_encrypted, // Set based on master protocol check
                 risk: Some(risk_info), // Wrap in Option
                 hostname,
                  // Fields from models.rs not directly mapped here (can be added if needed):
@@ -468,6 +500,32 @@ impl NdpiEngine {
             score: score as u32,
             name: risk_name,
         })
+    }
+
+    /// Cleans up flows that have timed out based on FLOW_TIMEOUT_MS.
+    fn cleanup_old_flows(&mut self) {
+        let flow_timeout_duration = Duration::from_millis(FLOW_TIMEOUT_MS);
+        let now = Instant::now();
+        let mut cleaned_count = 0;
+
+        // Use retain to iterate and remove elements in place
+        self.flow_cache.retain(|key, flow_info| {
+            if now.duration_since(flow_info.last_seen_instant) > flow_timeout_duration {
+                trace!("Timing out flow: {:?}", key);
+                // Free the associated nDPI flow structure
+                if !flow_info.ndpi_flow.is_null() {
+                    sys::ndpi_flow_free(flow_info.ndpi_flow);
+                }
+                cleaned_count += 1;
+                false // Remove the element
+            } else {
+                true // Keep the element
+            }
+        });
+
+        if cleaned_count > 0 {
+            debug!("Cleaned up {} timed-out flows.", cleaned_count);
+        }
     }
 
     /// Cleans up nDPI resources when the engine is dropped.
